@@ -218,3 +218,51 @@ def test_internal_invoice_snapshot_print_and_tenant_scope():
     create_user(stranger,'invoice-stranger')
     assert stranger.get('/api/invoices/'+inv['id']).status_code==404
     assert stranger.get('/api/invoices/'+inv['id']+'/print').status_code==404
+
+
+def test_public_showroom_is_isolated_and_read_only(monkeypatch):
+    """Anonymous showroom exposes only a dedicated synthetic tenant, never writes."""
+    from api.db import Session as DbSession
+    from api.models import User, Tenant, Member, Product
+    from api.security import DEMO_TENANT_ID, DEMO_USER_ID
+    session=DbSession()
+    try:
+        session.add(Tenant(id=DEMO_TENANT_ID,name='دموی آزمایشی',currency='TOMAN'))
+        session.add(User(id=DEMO_USER_ID,name='بازدیدکننده',email='demo-host@example.invalid',
+                         password_hash='disabled-demo-credentials',active=True))
+        session.flush()
+        session.add(Member(id='demo-test-member',tenant_id=DEMO_TENANT_ID,user_id=DEMO_USER_ID,role='owner',active=True))
+        session.add(Product(id='demo-visible-product',tenant_id=DEMO_TENANT_ID,name='کالای نمایشی',active=True,archived=False))
+        session.commit()
+    finally:
+        session.close()
+    real=TestClient(app)
+    real_user=create_user(real,'real-vs-demo')
+    real_product=create(real,'products',name='کالای خصوصی')
+    anonymous=TestClient(app)
+    assert anonymous.get('/api/auth/me').status_code==401
+    monkeypatch.setenv('PUBLIC_DEMO_ENABLED','true')
+    me=anonymous.get('/api/auth/me')
+    assert me.status_code==200,me.text
+    assert me.json()['public_demo'] is True
+    assert me.json()['tenant_id']==DEMO_TENANT_ID
+    catalog=anonymous.get('/api/data/products')
+    assert catalog.status_code==200,catalog.text
+    ids={r['id'] for r in catalog.json()['items']}
+    assert 'demo-visible-product' in ids and real_product['id'] not in ids
+    assert anonymous.get('/api/members').status_code==200
+    assert anonymous.get('/api/organizations').json()['items'][0]['id']==DEMO_TENANT_ID
+    for method,path,body in [
+        ('post','/api/data/products',{'name':'دستکاری دمو'}),
+        ('patch','/api/data/products/demo-visible-product',{'name':'دستکاری دمو'}),
+        ('delete','/api/data/products/demo-visible-product',None),
+        ('post','/api/auth/register',{'name':'x','company':'x','email':'bad@example.invalid','password':'longpassword123'}),
+        ('post','/api/stock/adjust',{'delta':1,'reason':'opening'}),
+    ]:
+        r=getattr(anonymous,method)(path,**({'json':body} if body is not None else {}))
+        assert r.status_code==403,(method,path,r.text)
+    # A real signed session still reads its own tenant and may manage its own data.
+    assert real.get('/api/auth/me').json()['public_demo'] is False
+    assert real.get('/api/auth/me').json()['tenant_id']==real_user['tenant_id']
+    assert real.post('/api/data/products',json={'name':'دومین کالای خصوصی'}).status_code==200
+    assert anonymous.get('/api/data/products').json()['total']==1
