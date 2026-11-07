@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 import os
+import io, csv
 from html import escape as html_escape
 from fastapi import FastAPI, Request, HTTPException, Depends, Body, Query
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, func, text, or_
 from sqlalchemy.exc import IntegrityError
@@ -1061,3 +1062,160 @@ def profit_loss(start:date|None=None,end:date|None=None,
             'balanced':balance['balanced'],'currency':'TOMAN',
             'account_totals':[x for x in balance['items']
                 if x['kind'] in ('revenue','expense')]}
+
+
+# Provider-neutral external integrations. The server never stores API tokens in
+# tenant settings; purchasing a provider is not necessary to inspect its setup.
+INTEGRATION_TYPES={
+ 'payment':{'label':'درگاه پرداخت','providers':['zarinpal','mellat','idpay','other'],
+            'fields':['callback_url'],'env':'PAYMENT_GATEWAY_SECRET'},
+ 'sms':{'label':'پنل پیامک','providers':['kavenegar','farazsms','melipayamak','other'],
+        'fields':['sender'],'env':'SMS_PROVIDER_API_KEY'},
+ 'email':{'label':'ارسال ایمیل','providers':['smtp','resend','other'],
+          'fields':['sender_email'],'env':'EMAIL_PROVIDER_API_KEY'},
+ 'storage':{'label':'فضای ذخیره‌سازی S3','providers':['parspack','minio','aws','other'],
+            'fields':['bucket','endpoint'],'env':'S3_ACCESS_KEY'},
+ 'shipping':{'label':'سامانه ارسال مرسوله','providers':['post','tipax','chapar','other'],
+             'fields':['origin_city'],'env':'SHIPPING_PROVIDER_TOKEN'},
+ 'storefront':{'label':'اتصال فروشگاه آنلاین','providers':['nextjs','woocommerce','custom'],
+               'fields':['store_name','base_url'],'env':'STOREFRONT_API_TOKEN'},
+}
+@app.get('/api/integrations')
+def integration_list(db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,ALL)
+    rows={r.kind:r for r in db.query(Integration).filter_by(tenant_id=ctx['tenant']).all()}
+    result=[]
+    for kind,meta in INTEGRATION_TYPES.items():
+        item=rows.get(kind)
+        result.append({'kind':kind,'label':meta['label'],'providers':meta['providers'],
+                       'fields':meta['fields'],'provider':item.provider if item else '',
+                       'settings':item.settings if item else {},'enabled':False,
+                       'status':'نیازمند اتصال سرویس خارجی',
+                       'required_env':meta['env']})
+    return {'items':result}
+
+@app.put('/api/integrations/{kind}')
+def integration_update(kind:str,body:dict=Body(...),db:Session=Depends(db_session),
+                       ctx:dict=Depends(principal)):
+    authorized(ctx,{'owner','admin'})
+    meta=INTEGRATION_TYPES.get(kind)
+    if not meta:raise HTTPException(404,'سرویس تعریف نشده است')
+    provider=body.get('provider')
+    if provider not in meta['providers']:raise HTTPException(422,'ارائه‌دهنده نامعتبر')
+    settings=body.get('settings',{})
+    if not isinstance(settings,dict) or set(settings)-set(meta['fields']):
+        raise HTTPException(422,'فیلدهای غیرمجاز یا محرمانه ارسال شده است')
+    clean={}
+    for k,v in settings.items():
+        if not isinstance(v,str) or len(v)>300:raise HTTPException(422,'مقدار تنظیمات نامعتبر است')
+        if k in ('base_url','callback_url','endpoint') and v and not v.startswith('https://'):
+            raise HTTPException(422,'نشانی سرویس باید HTTPS باشد')
+        clean[k]=v.strip()
+    item=db.query(Integration).filter_by(tenant_id=ctx['tenant'],kind=kind).with_for_update().first()
+    if not item:
+        item=Integration(tenant_id=ctx['tenant'],kind=kind)
+        db.add(item)
+    item.provider=provider;item.settings=clean;item.enabled=False
+    db.flush();audit(db,ctx,'configure','integrations',item.id,{'kind':kind,'provider':provider})
+    db.commit()
+    return {'ok':True,'enabled':False,'message':'تنظیمات غیرمحرمانه ذخیره شد؛ اتصال واقعی هنوز غیرفعال است'}
+
+@app.post('/api/integrations/{kind}/activate')
+def integration_activate(kind:str,ctx:dict=Depends(principal)):
+    authorized(ctx,{'owner','admin'})
+    if kind not in INTEGRATION_TYPES:raise HTTPException(404,'سرویس تعریف نشده است')
+    raise HTTPException(501,'اتصال واقعی تا دریافت اطلاعات سرویس و پیاده‌سازی و تست آداپتور غیرفعال است')
+
+@app.get('/api/stock/expiry-alerts')
+def expiry_alerts(days:int=Query(60,ge=0,le=730),
+                  page:int=Query(1,ge=1),limit:int=Query(50,ge=1,le=100),
+                  db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,ALL)
+    limit_date=date.today()+timedelta(days=days)
+    q=db.query(StockBatch,Variant,Warehouse).join(
+        Variant,StockBatch.variant_id==Variant.id).join(
+        Warehouse,StockBatch.warehouse_id==Warehouse.id).filter(
+        StockBatch.tenant_id==ctx['tenant'],Variant.tenant_id==ctx['tenant'],
+        Warehouse.tenant_id==ctx['tenant'],StockBatch.quantity>0,
+        StockBatch.expiry_date!=None,StockBatch.expiry_date<=limit_date)
+    total=q.count()
+    results=q.order_by(StockBatch.expiry_date.asc()).offset((page-1)*limit).limit(limit).all()
+    return {'total':total,'page':page,'items':[
+        {'lot_id':b.id,'lot':b.lot,'warehouse':w.name,'sku':v.sku,'variant_id':v.id,
+         'quantity':b.quantity,'expiry_date':b.expiry_date.isoformat(),
+         'days_left':(b.expiry_date-date.today()).days}
+        for b,v,w in results]}
+
+@app.get('/api/analytics')
+def business_analytics(start:date|None=None,end:date|None=None,
+                       db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,ALL)
+    period_end=end or date.today()
+    period_start=start or (period_end-timedelta(days=89))
+    if period_start>period_end or (period_end-period_start).days>366:
+        raise HTTPException(422,'بازه گزارش نباید بیشتر از یک سال باشد')
+    tid=ctx['tenant']
+    sales=db.query(SalesOrder).filter(SalesOrder.tenant_id==tid,
+        SalesOrder.created_at>=datetime.combine(period_start,datetime.min.time(),tzinfo=timezone.utc),
+        SalesOrder.created_at<datetime.combine(period_end+timedelta(days=1),datetime.min.time(),tzinfo=timezone.utc),
+        SalesOrder.status.in_(['confirmed','fulfilled'])).all()
+    channels={};daily={}
+    for o in sales:
+        key=o.created_at.date().isoformat()
+        v=daily.setdefault(key,{'date':key,'orders':0,'sales':0})
+        v['orders']+=1;v['sales']+=o.total
+        c=channels.setdefault(o.channel,{'channel':o.channel,'orders':0,'sales':0})
+        c['orders']+=1;c['sales']+=o.total
+    order_ids=[o.id for o in sales]
+    top=[]
+    if order_ids:
+        rows=db.query(SalesLine.variant_id,
+                      func.sum(SalesLine.quantity).label('qty'),
+                      func.sum(SalesLine.quantity*SalesLine.price).label('sales'),
+                      func.sum(SalesLine.quantity*(SalesLine.price-SalesLine.cost_snapshot)).label('margin')
+                      ).filter(SalesLine.tenant_id==tid,
+                              SalesLine.order_id.in_(order_ids)).group_by(
+                                  SalesLine.variant_id).order_by(
+                                      func.sum(SalesLine.quantity*SalesLine.price).desc()).limit(10).all()
+        for vid,qty,revenue,margin in rows:
+            v=db.get(Variant,vid)
+            top.append({'sku':v.sku if v else vid,'quantity':int(qty or 0),
+                        'sales':int(revenue or 0),'gross_margin':int(margin or 0)})
+    total=sum(o.total for o in sales)
+    return {'start':period_start.isoformat(),'end':period_end.isoformat(),
+            'sales':total,'paid':sum(o.paid for o in sales),'orders':len(sales),
+            'average_order':total//len(sales) if sales else 0,
+            'daily':sorted(daily.values(),key=lambda x:x['date']),
+            'channels':sorted(channels.values(),key=lambda x:-x['sales']),
+            'top_products':top,'currency':'TOMAN'}
+
+CSV_RESOURCES={'products','variants','warehouses','stocks','movements','batches',
+               'suppliers','customers','purchases','purchase-lines','sales','sales-lines',
+               'payments','returns','shipments','price-lists','price-items','cash-accounts',
+               'account-entries','notifications','audit'}
+
+@app.get('/api/export/{resource}.csv')
+def export_resource(resource:str,db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    if resource not in CSV_RESOURCES or resource not in READABLE:
+        raise HTTPException(404,'منبع خروجی نامعتبر')
+    model,roles,_=READABLE[resource]
+    authorized(ctx,roles)
+    # Bounded export; avoids unbounded serverless memory use.
+    rows=db.query(model).filter_by(tenant_id=ctx['tenant']).order_by(
+        model.created_at.desc()).limit(10000).all()
+    columns=[c.name for c in model.__table__.columns]
+    output=io.StringIO(newline='')
+    writer=csv.writer(output)
+    writer.writerow(columns)
+    def excel_safe(v):
+        if v is None:return ''
+        txt=str(v)
+        if txt and txt[0] in ('=','+','-','@','\t','\r'):
+            return "'"+txt
+        return txt
+    for row in rows:
+        writer.writerow([excel_safe(getattr(row,k)) for k in columns])
+    csv_text='\ufeff'+output.getvalue()
+    return StreamingResponse(iter([csv_text.encode('utf-8')]),media_type='text/csv; charset=utf-8',
+                             headers={'Content-Disposition':f'attachment; filename="erp-{resource}.csv"',
+                                      'Cache-Control':'no-store'})
