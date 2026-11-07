@@ -92,7 +92,7 @@ def notification(db,tid,title,body,category):
 LEDGER_BASE=(
  ('1010','صندوق نقدی','asset'),('1020','بانک و کارتخوان','asset'),
  ('1200','حساب‌های دریافتنی','asset'),('1300','موجودی کالا','asset'),
- ('2000','حساب‌های پرداختنی','liability'),('3000','سرمایه و موجودی افتتاحیه','equity'),
+ ('2000','حساب‌های پرداختنی','liability'),('2100','مالیات فروش پرداختنی','liability'),('3000','سرمایه و موجودی افتتاحیه','equity'),
  ('4000','درآمد فروش','revenue'),('4100','برگشت از فروش','revenue'),
  ('5000','بهای تمام‌شده فروش','expense'),('6000','تعدیل و کسری انبار','expense'),
 )
@@ -725,13 +725,33 @@ def create_sale(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depe
     authorized(ctx,SALES)
     tid=ctx['tenant'];wh=tenant_object(db,Warehouse,tid,body.get('warehouse_id'))
     cid=body.get('customer_id')
-    if cid:tenant_object(db,Customer,tid,cid)
+    customer=tenant_object(db,Customer,tid,cid,lock=True) if cid else None
     channel=body.get('channel','retail')
     if channel not in ('retail','wholesale','online','pos'):raise HTTPException(422,'کانال نامعتبر')
     lines,total=_create_lines(db,tid,body.get('items'),SalesLine,'wholesale_price' if channel=='wholesale' else 'retail_price','price')
     discount=amount(body.get('discount',0),'تخفیف')
     if discount>total:raise HTTPException(422,'تخفیف از کل بیشتر است')
-    obj=SalesOrder(tenant_id=tid,customer_id=cid,warehouse_id=wh.id,number=_number('SO'),channel=channel,total=total-discount,discount=discount)
+    rate_id=body.get('tax_rate_id')
+    rate=tenant_object(db,Tax,tid,rate_id) if rate_id else None
+    taxable=total-discount
+    tax_amount=(taxable*rate.percentage+50)//100 if rate else 0
+    terms=body.get('payment_terms','immediate')
+    if terms not in ('immediate','credit'):raise HTTPException(422,'شرایط تسویه نامعتبر است')
+    grand_total=taxable+tax_amount
+    if terms=='credit':
+        if not customer or customer.credit_limit<=0:
+            raise HTTPException(409,'برای خرید اعتباری باید سقف اعتبار مشتری تعریف شود')
+        exposure=int(db.query(func.coalesce(func.sum(SalesOrder.total-SalesOrder.paid),0)).filter(
+            SalesOrder.tenant_id==tid,SalesOrder.customer_id==customer.id,
+            SalesOrder.payment_terms=='credit',
+            SalesOrder.status!='cancelled',
+            SalesOrder.total>SalesOrder.paid).scalar() or 0)
+        if exposure+grand_total>customer.credit_limit:
+            raise HTTPException(409,'سفارش از سقف اعتبار مشتری بیشتر است')
+    obj=SalesOrder(tenant_id=tid,customer_id=cid,warehouse_id=wh.id,
+                   number=_number('SO'),channel=channel,total=grand_total,
+                   discount=discount,tax_amount=tax_amount,tax_rate_id=rate_id,
+                   payment_terms=terms)
     db.add(obj);db.flush()
     for variant,qty,price in lines:
         db.add(SalesLine(tenant_id=tid,order_id=obj.id,variant_id=variant.id,quantity=qty,price=price,cost_snapshot=variant.purchase_cost))
@@ -882,13 +902,15 @@ def issue_invoice(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=De
     lines=db.query(SalesLine).filter_by(tenant_id=tid,order_id=order.id).all()
     if not lines:raise HTTPException(409,'سفارش بدون قلم است')
     subtotal=sum(l.quantity*l.price for l in lines)
-    if subtotal-order.discount!=order.total:
+    if subtotal-order.discount+order.tax_amount!=order.total:
         raise HTTPException(409,'مبلغ سفارش و ردیف‌ها با هم سازگار نیستند')
     customer=tenant_object(db,Customer,tid,order.customer_id) if order.customer_id else None
     obj=Invoice(tenant_id=tid,order_id=order.id,number=_number('INV'),
                 customer_name=customer.name if customer else 'مشتری حضوری',
                 customer_address=customer.address or '' if customer else '',
                 subtotal=subtotal,discount=order.discount,total=order.total,
+                tax_amount=order.tax_amount,
+                tax_name=(tenant_object(db,Tax,tid,order.tax_rate_id).name if order.tax_rate_id else ''),
                 issuer_id=ctx['user'].id)
     db.add(obj);db.flush()
     for item in lines:
