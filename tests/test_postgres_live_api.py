@@ -57,6 +57,6 @@ def test_double_entry_integrity_over_actual_postgresql_demo():
     r = client.get("/api/ledger/integrity")
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["total"] > 0, body
-    assert body["invalid_count"] == 0, body
+    assert body["journal_count"] > 0, body
+    assert body["issue_count"] == 0, body
     assert client.get("/api/ledger/integrity?start=2026-12-31&end=2026-01-01").status_code == 422
