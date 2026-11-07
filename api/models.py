@@ -213,7 +213,7 @@ class SalesLine(Entity,Base):
     variant_id: Mapped[str]=mapped_column(String(36),ForeignKey('variants.id'),nullable=False)
     quantity: Mapped[int]=mapped_column(Integer,nullable=False)
     returned: Mapped[int]=mapped_column(Integer,default=0)
-    fulfilled: Mapped[int]=mapped_column(Integer,default=0)
+    fulfilled: Mapped[int]=mapped_column(Integer,default=0,server_default='0')
     price: Mapped[int]=mapped_column(BigInteger,nullable=False)
     cost_snapshot: Mapped[int]=mapped_column(BigInteger,default=0)
     __table_args__=(CheckConstraint('quantity > 0 AND price >= 0 AND returned >= 0 AND returned <= fulfilled AND fulfilled >= 0 AND fulfilled <= quantity'),)
