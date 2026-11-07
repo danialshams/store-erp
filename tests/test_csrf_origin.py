@@ -1,4 +1,9 @@
 """CSRF regression coverage against browser-originated unsafe requests."""
+import os, tempfile
+fd, path = tempfile.mkstemp(suffix='.db')
+os.close(fd)
+os.environ['DATABASE_URL'] = 'sqlite:///' + path
+os.environ['APP_SECRET'] = 'test-secret-only'
 from fastapi.testclient import TestClient
 from api.index import app
 
