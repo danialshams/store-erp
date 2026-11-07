@@ -1,6 +1,10 @@
 -- Run against a disposable CI database, never production.
 -- Check every tenant-scoped relation using a NON-owner role (table owners bypass RLS).
 BEGIN;
+INSERT INTO tenants(id,name,currency,created_at)
+VALUES ('ci-matrix-other-tenant','Matrix Other Tenant','TOMAN',NOW());
+INSERT INTO categories(id,tenant_id,name,created_at)
+VALUES ('ci-matrix-other-category','ci-matrix-other-tenant','Other category',NOW());
 DO $setup$
 BEGIN
  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='erp_rls_matrix_test') THEN
@@ -31,7 +35,7 @@ BEGIN
    EXECUTE format('SELECT count(*) FROM public.%I',t.table_name) INTO demo;
    EXECUTE format('SELECT count(*) FROM public.%I WHERE tenant_id <> %L',
                   t.table_name,'demo-erp-tenant-2026') INTO wrong;
-   PERFORM set_config('erp.tenant_id','ci-other-tenant',true);
+   PERFORM set_config('erp.tenant_id','ci-matrix-other-tenant',true);
    EXECUTE format('SELECT count(*) FROM public.%I',t.table_name) INTO other_tenant;
    IF missing <> 0 OR wrong <> 0 THEN
      RAISE EXCEPTION 'Tenant RLS leak: table %, missing_scope %, wrong_scope %',
