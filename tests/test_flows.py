@@ -624,3 +624,51 @@ def test_partial_fulfillment_split_revenue_and_reserve_release():
     assert other.get('/api/fulfillments').json()['total']==0
     assert other.patch('/api/fulfillments/'+all_docs[0]['id'],
         json={'status':'delivered'}).status_code==404
+
+
+def test_fefo_availability_is_tenant_scoped_expiry_aware_and_read_only():
+    from datetime import date, timedelta
+    owner=TestClient(app)
+    create_user(owner,'fefo-preview-owner')
+    warehouse=owner.get('/api/data/warehouses').json()['items'][0]
+    product=create(owner,'products',name='FEFO preview product')
+    variant=create(owner,'variants',product_id=product['id'],name='tracked',
+                   sku='FEFO-PREVIEW-1',track_batch=True,
+                   retail_price=1000,purchase_cost=500)
+    today=date.today()
+    def add_lot(name,quantity,expiry):
+        r=owner.post('/api/stock/adjust',json={
+            'warehouse_id':warehouse['id'],'variant_id':variant['id'],
+            'delta':quantity,'reason':'opening','lot':name,
+            'expiry_date':expiry.isoformat()})
+        assert r.status_code==200,r.text
+    add_lot('expired',8,today-timedelta(days=1))
+    add_lot('late',6,today+timedelta(days=40))
+    add_lot('early',3,today+timedelta(days=3))
+    path=f"/api/stock/fefo-availability/{variant['id']}"
+    query={'warehouse_id':warehouse['id'],'quantity':7}
+    first=owner.get(path,params=query)
+    assert first.status_code==200,first.text
+    result=first.json()
+    assert result['expired_quantity']==8
+    assert result['available']==9
+    assert result['allocatable']==7 and result['sufficient'] is True
+    assert [(x['lot'],x['quantity']) for x in result['allocation']]==[
+        ('early',3),('late',4)]
+    assert owner.get(path,params=query).json()==result
+    assert owner.get(path,params={'warehouse_id':warehouse['id'],
+                                  'quantity':10}).json()['sufficient'] is False
+    assert owner.get(path,params={'warehouse_id':warehouse['id'],
+                                  'quantity':0}).status_code==422
+    trace=owner.get(f"/api/stock/traceability/{variant['id']}",
+                    params={'warehouse_id':warehouse['id']}).json()
+    assert {x['lot']:x['quantity'] for x in trace['lots']}=={
+        'expired':8,'early':3,'late':6}
+    outsider=TestClient(app)
+    create_user(outsider,'fefo-preview-outsider')
+    assert outsider.get(path,params=query).status_code==404
+    assert owner.get(path,params={'warehouse_id':'other-tenant-warehouse'}).status_code==404
+    untracked=create(owner,'variants',product_id=product['id'],name='untracked',
+                     sku='FEFO-PREVIEW-2')
+    assert owner.get(f"/api/stock/fefo-availability/{untracked['id']}",
+                     params={'warehouse_id':warehouse['id']}).status_code==422
