@@ -14,7 +14,7 @@ from html import escape as html_escape
 from fastapi import FastAPI, Request, HTTPException, Depends, Body, Query
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select, func, text, or_
+from sqlalchemy import select, func, text, or_, case
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .db import Session as DbSession, init_db, engine
@@ -1331,6 +1331,55 @@ def ledger_journal_create(body:dict=Body(...),db:Session=Depends(db_session),
         db.rollback()
         raise HTTPException(409,'شماره یا شناسه سند تکراری است')
     return {'journal':as_dict(doc),'total':sum(line[1] for line in lines)}
+
+@app.get('/api/ledger/integrity')
+def ledger_integrity(start:date|None=None,end:date|None=None,
+                     db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    """Read-only audit: each posted journal must have >=2 valid, balanced lines.
+
+    Trial-balance totals alone are insufficient: two unbalanced documents can
+    cancel one another. Restrict both sides of the join to the current tenant.
+    """
+    authorized(ctx,FINANCE|{'viewer'})
+    if start and end and start>end:
+        raise HTTPException(422,'بازه تاریخ نامعتبر است')
+    tid=ctx['tenant']
+    invalid_line=(JournalLine.id.isnot(None)) & (
+        (JournalLine.debit < 0) | (JournalLine.credit < 0) |
+        ((JournalLine.debit > 0) & (JournalLine.credit > 0)) |
+        ((JournalLine.debit == 0) & (JournalLine.credit == 0)))
+    q=db.query(
+        Journal.id,Journal.number,
+        func.count(JournalLine.id).label('line_count'),
+        func.coalesce(func.sum(JournalLine.debit),0).label('debit'),
+        func.coalesce(func.sum(JournalLine.credit),0).label('credit'),
+        func.coalesce(func.sum(case((invalid_line,1),else_=0)),0).label('invalid_lines'))
+    q=q.outerjoin(JournalLine,
+        (JournalLine.journal_id==Journal.id) &
+        (JournalLine.tenant_id==tid)).filter(Journal.tenant_id==tid)
+    if start:q=q.filter(Journal.journal_date>=start)
+    if end:q=q.filter(Journal.journal_date<=end)
+    rows=q.group_by(Journal.id,Journal.number).all()
+    issues=[]
+    debit_total=credit_total=0
+    for row in rows:
+        debit=int(row.debit);credit=int(row.credit)
+        debit_total+=debit;credit_total+=credit
+        reasons=[]
+        if row.line_count<2:reasons.append('insufficient_lines')
+        if debit!=credit:reasons.append('unbalanced')
+        if int(row.invalid_lines):reasons.append('invalid_lines')
+        if reasons:
+            issues.append({'journal_id':row.id,'number':row.number,
+                           'line_count':row.line_count,'debit':debit,
+                           'credit':credit,'reasons':reasons})
+    return {'ok':not issues,'journal_count':len(rows),
+            'issue_count':len(issues),'issues':issues[:100],
+            'issues_truncated':len(issues)>100,
+            'total_debit':debit_total,'total_credit':credit_total,
+            'currency':'TOMAN',
+            'start':start.isoformat() if start else None,
+            'end':end.isoformat() if end else None}
 
 @app.get('/api/ledger/trial-balance')
 def trial_balance(start:date|None=None,end:date|None=None,

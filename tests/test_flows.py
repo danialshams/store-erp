@@ -282,6 +282,44 @@ def test_public_showroom_is_isolated_and_read_only(monkeypatch):
     assert anonymous.get('/api/public-mode').json()=={'enabled':False,'mode':'private'}
 
 
+def test_ledger_integrity_audit_is_per_journal_and_tenant_scoped():
+    from api.db import Session as DbSession
+    from api.models import Journal, JournalLine
+    a=TestClient(app)
+    b=TestClient(app)
+    ua=create_user(a,'audit-a')
+    create_user(b,'audit-b')
+    assert a.get('/api/ledger/integrity').json()['ok'] is True
+    assert a.get('/api/ledger/integrity?start=2026-12-31&end=2026-01-01').status_code==422
+    assert a.get('/api/ledger/integrity?start=not-a-date').status_code==422
+    accounts=a.get('/api/ledger/accounts').json()['items']
+    codes={x['code']:x['id'] for x in accounts}
+    entry={'memo':'سند حسابرسی','idempotency_key':'audit-1',
+           'lines':[{'account_id':codes['1010'],'debit':300,'credit':0},
+                    {'account_id':codes['3000'],'debit':0,'credit':300}]}
+    doc=a.post('/api/ledger/journals',json=entry)
+    assert doc.status_code==200,doc.text
+    assert a.get('/api/ledger/integrity').json()['journal_count']>=1
+    assert a.get('/api/ledger/integrity').json()['ok'] is True
+    assert b.get('/api/ledger/integrity').json()['journal_count']==0
+    # Simulate historical corruption in an isolated SQLite test database.
+    # Two bad documents can cancel at the trial-balance level, so audit each.
+    session=DbSession()
+    try:
+        journal=session.get(Journal,doc.json()['journal']['id'])
+        line=session.query(JournalLine).filter_by(journal_id=journal.id,debit=300).first()
+        line.debit=299
+        session.commit()
+        report=a.get('/api/ledger/integrity').json()
+        assert report['ok'] is False
+        assert report['issue_count']==1
+        assert 'unbalanced' in report['issues'][0]['reasons']
+        assert b.get('/api/ledger/integrity').json()['issue_count']==0
+    finally:
+        session.rollback()
+        session.close()
+
+
 def test_double_entry_finance_posting_and_tenant_scoping():
     client=TestClient(app)
     owner=create_user(client,'ledger-owner')
