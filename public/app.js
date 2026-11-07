@@ -360,10 +360,10 @@ async function openReturn(kind,id){
  const variants=await lookup('variants');
  if(!data.items.length)return notify('سند بدون ردیف است',true);
  const opts=data.items.map(x=>({id:x.variant_id,label:(variants.find(v=>v.id===x.variant_id)?.sku||x.variant_id.slice(0,8))+' / '+fa(x.quantity)+' عدد'}));
- const content=`<div class="notice">مرجوعی به سند اصلی متصل می‌شود و تاریخچه تغییرات قابل ردیابی خواهد بود.</div><div class="form-grid" style="margin-top:18px"><div class="field"><label>کالا</label>${selectField('variant_id',opts)}</div><div class="field"><label>تعداد مرجوعی</label><input class="input" type="number" name="quantity" min="1" value="1" required></div>${purchase?'':`<div class="field full"><label>بازگشت کالا به موجودی</label>${selectField('restock',[{id:'true',label:'بله، کالا سالم است'},{id:'false',label:'خیر، کالا معیوب است'}])}</div>`}</div>`;
+ const content=`<div class="notice">مرجوعی به سند اصلی متصل می‌شود و تاریخچه تغییرات قابل ردیابی خواهد بود.</div><div class="form-grid" style="margin-top:18px"><div class="field"><label>کالا</label>${selectField('variant_id',opts)}</div><div class="field"><label>تعداد مرجوعی</label><input class="input" type="number" name="quantity" min="1" value="1" required></div>${purchase?'':`<div class="field full"><label>بازگشت کالا به موجودی</label>${selectField('restock',[{id:'true',label:'بله، کالا سالم است'},{id:'false',label:'خیر، کالا معیوب است'}])}</div>`}<div class="field full"><label>سریال‌های کالای برگشتی (برای کالاهای سریالی، هر خط یک شماره)</label><textarea class="input" name="serials" rows="3"></textarea></div></div>`;
  showModal('ثبت مرجوعی '+(purchase?'خرید':'فروش'),content,async form=>{
   const f=new FormData(form);
-  await api('returns',{method:'POST',body:{direction:purchase?'purchase':'sale',order_id:id,variant_id:f.get('variant_id'),quantity:Number(f.get('quantity')),restock:purchase?false:f.get('restock')==='true',idempotency_key:uid()}});
+  await api('returns',{method:'POST',body:{direction:purchase?'purchase':'sale',order_id:id,variant_id:f.get('variant_id'),quantity:Number(f.get('quantity')),restock:purchase?false:f.get('restock')==='true',serials:serialList(f.get('serials')),idempotency_key:uid()}});
   closeModal();notify('مرجوعی ثبت شد');loadView();
  },{save:'ثبت مرجوعی'});
 }
