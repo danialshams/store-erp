@@ -738,14 +738,31 @@ def create_sale(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depe
     terms=body.get('payment_terms','immediate')
     if terms not in ('immediate','credit'):raise HTTPException(422,'شرایط تسویه نامعتبر است')
     grand_total=taxable+tax_amount
+
+def _credit_due_by_customer(db:Session,tenant_id:str,customer_ids:list[str]):
+    if not customer_ids:return {}
+    open_sales=db.query(SalesOrder).filter(
+        SalesOrder.tenant_id==tenant_id,
+        SalesOrder.customer_id.in_(customer_ids),
+        SalesOrder.payment_terms=='credit',
+        SalesOrder.status!='cancelled',
+        SalesOrder.total>SalesOrder.paid).all()
+    order_ids=[x.id for x in open_sales]
+    refunded={}
+    if order_ids:
+        refunded={sid:int(value or 0) for sid,value in db.query(
+            Return.order_id,func.coalesce(func.sum(Return.amount),0)).filter(
+                Return.tenant_id==tenant_id,Return.direction=='sale',
+                Return.order_id.in_(order_ids)).group_by(Return.order_id).all()}
+    out={cid:0 for cid in customer_ids}
+    for order in open_sales:
+        out[order.customer_id]+=max(0,int(order.total-order.paid-refunded.get(order.id,0)))
+    return out
+
     if terms=='credit':
         if not customer or customer.credit_limit<=0:
             raise HTTPException(409,'برای خرید اعتباری باید سقف اعتبار مشتری تعریف شود')
-        exposure=int(db.query(func.coalesce(func.sum(SalesOrder.total-SalesOrder.paid),0)).filter(
-            SalesOrder.tenant_id==tid,SalesOrder.customer_id==customer.id,
-            SalesOrder.payment_terms=='credit',
-            SalesOrder.status!='cancelled',
-            SalesOrder.total>SalesOrder.paid).scalar() or 0)
+        exposure=_credit_due_by_customer(db,tid,[customer.id]).get(customer.id,0)
         if exposure+grand_total>customer.credit_limit:
             raise HTTPException(409,'سفارش از سقف اعتبار مشتری بیشتر است')
     obj=SalesOrder(tenant_id=tid,customer_id=cid,warehouse_id=wh.id,
@@ -1648,17 +1665,7 @@ def credit_exposure(page:int=Query(1,ge=1),limit:int=Query(50,ge=1,le=100),
     total=q.count()
     customers=q.order_by(Customer.name).offset((page-1)*limit).limit(limit).all()
     ids=[x.id for x in customers]
-    due={}
-    if ids:
-        for cid,debt in db.query(SalesOrder.customer_id,
-              func.coalesce(func.sum(SalesOrder.total-SalesOrder.paid),0)).filter(
-                SalesOrder.tenant_id==tid,
-                SalesOrder.payment_terms=='credit',
-                SalesOrder.status!='cancelled',
-                SalesOrder.total>SalesOrder.paid,
-                SalesOrder.customer_id.in_(ids)).group_by(
-                    SalesOrder.customer_id).all():
-            due[cid]=int(debt or 0)
+    due=_credit_due_by_customer(db,tid,ids)
     return {'page':page,'total':total,'items':[
       {'id':c.id,'name':c.name,'group_name':c.group_name,
        'credit_limit':c.credit_limit,'outstanding':due.get(c.id,0),
