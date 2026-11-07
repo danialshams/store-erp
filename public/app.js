@@ -11,7 +11,7 @@ const ICON={grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y=
 function icon(name,size=18){return `<span class="icon"><svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[name]||ICON.box}</svg></span>`}
 const NAV=[
  ['نمای کلی',[['dashboard','داشبورد','grid'],['notifications','اعلان‌ها','bell']]],
- ['کالا و موجودی',[['products','کالاها','box'],['variants','تنوع و قیمت','layers'],['categories','دسته‌بندی‌ها','tag'],['warehouses','انبارها','warehouse'],['stocks','موجودی کالا','box'],['movements','گردش انبار','swap'],['cycle-count','انبارگردانی','check'],['transfers','انتقال بین انبارها','swap']]],
+ ['کالا و موجودی',[['products','کالاها','box'],['variants','تنوع و قیمت','layers'],['categories','دسته‌بندی‌ها','tag'],['warehouses','انبارها','warehouse'],['stocks','موجودی کالا','box'],['batches','بچ و تاریخ انقضا','layers'],['movements','گردش انبار','swap'],['cycle-count','انبارگردانی','check'],['transfers','انتقال بین انبارها','swap']]],
  ['خرید و فروش',[['suppliers','تأمین‌کنندگان','truck'],['purchases','سفارش‌های خرید','cart'],['customers','مشتریان','users'],['sales','فروش و سفارش‌ها','cart'],['returns','مرجوعی‌ها','returns'],['shipments','ارسال و رهگیری','truck']]],
  ['امور مالی',[['invoices','فاکتورهای فروش','file'],['payments','پرداخت‌ها','coins'],['cash-accounts','حساب‌ها','card'],['account-entries','گردش حساب‌ها','file'],['price-lists','لیست‌های قیمت','tag'],['price-items','قیمت‌های اختصاصی','tag'],['tax-rates','مالیات‌ها','file'],['reports','گزارش‌ها','chart']]],
  ['مدیریت',[['team','کاربران و دسترسی','users'],['settings','تنظیمات کسب‌وکار','settings'],['audit','تاریخچه عملیات','clock']]]
@@ -27,6 +27,7 @@ const META={
  variants:{cols:['sku','name','purchase_cost','retail_price','low_stock','active'],fields:['product_id','name','sku','barcode','unit','purchase_cost','retail_price','wholesale_price','low_stock','track_batch','track_serial','active']},
  warehouses:{cols:['name','code','address','active'],fields:['name','code','address','active']},
  stocks:{cols:['variant_id','warehouse_id','quantity','reserved'],readonly:true},
+ batches:{cols:['variant_id','warehouse_id','lot','expiry_date','quantity'],readonly:true},
  movements:{cols:['variant_id','warehouse_id','delta','reason','created_at'],readonly:true},
  transfers:{cols:['variant_id','quantity','source_id','destination_id','status'],special:'transfer'},
  suppliers:{cols:['name','phone','email','created_at'],fields:['name','phone','email','address','notes']},
