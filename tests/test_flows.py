@@ -95,3 +95,11 @@ def test_invite_rbac_and_reference_isolation():
     assert guest.post('/api/data/categories',json={'name':'مجاز'}).status_code==200
     assert guest.post('/api/payments',json={'sale_id':'x','amount':10,'idempotency_key':'impossible'}).status_code==403
     assert stranger.get('/api/data/categories').json()['total']==0
+
+
+def test_cross_origin_mutation_returns_403_not_500():
+    client=TestClient(app, raise_server_exceptions=False)
+    response=client.post('/api/auth/login', json={'email':'nobody@example.com','password':'test'},
+                         headers={'Origin':'https://malicious.example'})
+    assert response.status_code==403, response.text
+    assert response.json()['detail']=='درخواست از مبدأ غیرمجاز'
