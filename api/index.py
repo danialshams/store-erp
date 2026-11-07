@@ -1145,6 +1145,11 @@ def read_notification(notification_id:str,db:Session=Depends(db_session),ctx:dic
     obj=tenant_object(db,Notification,ctx['tenant'],notification_id)
     obj.read=True;db.commit();return {'ok':True}
 
+@app.get('/api/public-mode')
+def public_mode():
+    """Safe, non-sensitive UI hint to avoid displaying a sign-in form in showroom mode."""
+    return {'enabled':public_demo_enabled(),'mode':'read-only' if public_demo_enabled() else 'private'}
+
 @app.get('/api/health')
 def health():return {'ok':True,'service':'store-erp'}
 
