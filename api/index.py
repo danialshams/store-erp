@@ -1344,19 +1344,19 @@ def ledger_integrity(start:date|None=None,end:date|None=None,
     if start and end and start>end:
         raise HTTPException(422,'بازه تاریخ نامعتبر است')
     tid=ctx['tenant']
-    q=db.query(Journal.id,Journal.number,
-                func.count(JournalLine.id).label('line_count'),
-                func.coalesce(func.sum(JournalLine.debit),0).label('debit'),
-                func.coalesce(func.sum(JournalLine.credit),0).label('credit'),
-                func.coalesce(func.sum(
-                    case((JournalLine.id.isnot(None)) &
-                         ((JournalLine.debit < 0) | (JournalLine.credit < 0) |
-                          ((JournalLine.debit > 0) & (JournalLine.credit > 0)) |
-                          ((JournalLine.debit == 0) & (JournalLine.credit == 0))),1),
-                         else_=0)),0).label('invalid_lines'))
+    invalid_line=(JournalLine.id.isnot(None)) & (
+        (JournalLine.debit < 0) | (JournalLine.credit < 0) |
+        ((JournalLine.debit > 0) & (JournalLine.credit > 0)) |
+        ((JournalLine.debit == 0) & (JournalLine.credit == 0)))
+    q=db.query(
+        Journal.id,Journal.number,
+        func.count(JournalLine.id).label('line_count'),
+        func.coalesce(func.sum(JournalLine.debit),0).label('debit'),
+        func.coalesce(func.sum(JournalLine.credit),0).label('credit'),
+        func.coalesce(func.sum(case((invalid_line,1),else_=0)),0).label('invalid_lines'))
     q=q.outerjoin(JournalLine,
-           (JournalLine.journal_id==Journal.id) &
-           (JournalLine.tenant_id==tid)).filter(Journal.tenant_id==tid)
+        (JournalLine.journal_id==Journal.id) &
+        (JournalLine.tenant_id==tid)).filter(Journal.tenant_id==tid)
     if start:q=q.filter(Journal.journal_date>=start)
     if end:q=q.filter(Journal.journal_date<=end)
     rows=q.group_by(Journal.id,Journal.number).all()
