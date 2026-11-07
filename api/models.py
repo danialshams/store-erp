@@ -216,7 +216,7 @@ class SalesLine(Entity,Base):
     fulfilled: Mapped[int]=mapped_column(Integer,default=0,server_default='0')
     price: Mapped[int]=mapped_column(BigInteger,nullable=False)
     cost_snapshot: Mapped[int]=mapped_column(BigInteger,default=0)
-    __table_args__=(CheckConstraint('quantity > 0 AND price >= 0 AND returned >= 0 AND returned <= fulfilled AND fulfilled >= 0 AND fulfilled <= quantity'),)
+    __table_args__=(CheckConstraint('quantity > 0 AND price >= 0 AND returned >= 0 AND returned <= quantity AND fulfilled >= 0 AND fulfilled <= quantity'),)
 
 
 class Fulfillment(Entity,Base):
