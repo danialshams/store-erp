@@ -87,6 +87,51 @@ def audit(db,ctx,action,entity,item=None,details=None):
 def notification(db,tid,title,body,category):
     db.add(Notification(tenant_id=tid,title=title,body=body,category=category))
 
+# Standard editable chart of accounts; no external accounting provider is needed.
+LEDGER_BASE=(
+ ('1010','صندوق نقدی','asset'),('1020','بانک و کارتخوان','asset'),
+ ('1200','حساب‌های دریافتنی','asset'),('1300','موجودی کالا','asset'),
+ ('2000','حساب‌های پرداختنی','liability'),('3000','سرمایه و موجودی افتتاحیه','equity'),
+ ('4000','درآمد فروش','revenue'),('4100','برگشت از فروش','revenue'),
+ ('5000','بهای تمام‌شده فروش','expense'),('6000','تعدیل و کسری انبار','expense'),
+)
+def _ensure_ledger(db,tenant):
+    if db.bind.dialect.name=='postgresql':
+        db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),
+                   {'key':'ledger-accounts:'+tenant})
+    found={x.code:x for x in db.query(LedgerAccount).filter_by(tenant_id=tenant).all()}
+    for code,name,kind in LEDGER_BASE:
+        if code not in found:
+            item=LedgerAccount(tenant_id=tenant,code=code,name=name,kind=kind,active=True)
+            db.add(item);db.flush();found[code]=item
+    return found
+
+def _post_journal(db,ctx,source,memo,postings):
+    """Post a balanced immutable entry within the calling business transaction."""
+    if not postings:return None
+    debit=sum(int(dr) for _,dr,_ in postings)
+    credit=sum(int(cr) for _,_,cr in postings)
+    if debit!=credit or debit<=0 or any(
+        type(dr) is not int or type(cr) is not int or
+        (dr>0)==(cr>0) or dr<0 or cr<0 for _,dr,cr in postings
+    ):
+        raise HTTPException(422,'سند حسابداری باید دوطرفه و تراز باشد')
+    tenant=ctx['tenant']
+    if db.query(Journal).filter_by(tenant_id=tenant,source_key=source).first():
+        raise HTTPException(409,'این رویداد قبلاً در دفتر کل ثبت شده است')
+    accounts=_ensure_ledger(db,tenant)
+    hdr=Journal(tenant_id=tenant,source_key=source,
+                number='J-'+uuid4().hex[:22],memo=str(memo)[:1500],
+                journal_date=date.today(),actor_id=ctx['user'].id)
+    db.add(hdr);db.flush()
+    for code,dr,cr in postings:
+        acct=accounts.get(code)
+        if not acct or not acct.active:raise HTTPException(422,'حساب دفتر کل یافت نشد: '+code)
+        db.add(JournalLine(tenant_id=tenant,journal_id=hdr.id,account_id=acct.id,
+                           debit=dr,credit=cr))
+    db.flush()
+    return hdr
+
 def amount(value,name='مبلغ'):
     if type(value) is not int or value < 0 or value > 9_000_000_000_000_000:
         raise HTTPException(422,f'{name} باید عدد صحیح غیرمنفی باشد')
@@ -95,6 +140,10 @@ def amount(value,name='مبلغ'):
 def positive(value,name='تعداد'):
     if type(value) is not int or value<=0 or value>1_000_000:
         raise HTTPException(422,f'{name} باید عدد صحیح مثبت باشد')
+    return value
+def positive_amount(value,name='مبلغ'):
+    amount(value,name)
+    if value==0:raise HTTPException(422,f'{name} باید بیشتر از صفر باشد')
     return value
 
 def require_string(value,label='مقدار',maxlen=200):
@@ -124,6 +173,7 @@ def register(body:dict=Body(...),db:Session=Depends(db_session)):
             db.execute(text("SELECT set_config('erp.tenant_id', :tenant_id, true)"),
                        {'tenant_id':tenant.id})
         db.add(Member(tenant_id=tenant.id,user_id=user.id,role='owner'))
+        _ensure_ledger(db,tenant.id)
         db.add(Warehouse(tenant_id=tenant.id,name='انبار اصلی',code='MAIN'))
         db.add(CashAccount(tenant_id=tenant.id,name='صندوق اصلی',type='cash'))
         db.commit()
@@ -295,6 +345,15 @@ def adjust(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(p
     reason=require_string(body.get('reason'),'دلیل',100)
     if reason not in ['opening','correction','damage','loss','cycle_count']:raise HTTPException(422,'دلیل معتبر نیست')
     stock=_stock(db,ctx,body.get('warehouse_id'),body.get('variant_id'),delta,reason,note=body.get('note'))
+    cost=tenant_object(db,Variant,ctx['tenant'],body.get('variant_id')).purchase_cost
+    value=abs(delta*cost)
+    if value:
+        if delta>0:
+            _post_journal(db,ctx,'stock-adjust:'+str(uuid4()),'افزایش موجودی - '+reason,
+                          [('1300',value,0),('3000',0,value)])
+        else:
+            _post_journal(db,ctx,'stock-adjust:'+str(uuid4()),'کاهش موجودی - '+reason,
+                          [('6000',value,0),('1300',0,value)])
     audit(db,ctx,'adjust_stock','stocks',stock.id,{'delta':delta,'reason':reason})
     db.commit()
     return as_dict(stock)
@@ -443,12 +502,18 @@ def receive_purchase(purchase_id:str,body:dict=Body(default={}),db:Session=Depen
     desired={item['line_id']:positive(item['quantity']) for item in provided} if provided else {l.id:l.quantity-l.received for l in lines if l.quantity>l.received}
     if not desired:raise HTTPException(409,'قلمی برای دریافت وجود ندارد')
     if set(desired)-{l.id for l in lines}:raise HTTPException(422,'ردیف غیرمجاز')
+    received_value=0
     for line in lines:
         q=desired.get(line.id,0)
         if q:
             if q>line.quantity-line.received:raise HTTPException(409,'دریافت بیش از تعداد سفارش')
             _stock(db,ctx,order.warehouse_id,line.variant_id,q,'purchase_receive',order.id)
             line.received+=q
+            received_value+=q*line.cost
+    if received_value:
+        _post_journal(db,ctx,'purchase-receive:'+order.id+':'+(key or uuid4().hex),
+                      'دریافت سفارش خرید '+order.number,
+                      [('1300',received_value,0),('2000',0,received_value)])
     order.status='received' if all(l.received==l.quantity for l in lines) else 'partial'
     audit(db,ctx,'receive','purchases',order.id,{'lines':desired})
     if key:db.add(EventKey(tenant_id=ctx['tenant'],kind='purchase_receive',key=key,reference_id=order.id))
@@ -486,6 +551,14 @@ def sale_action(sale_id:str,action:str,db:Session=Depends(db_session),ctx:dict=D
     elif action=='fulfill' and order.status=='confirmed':
         for vid,qty in sorted(counts.items()):_stock(db,ctx,order.warehouse_id,vid,-qty,'sale_fulfill',order.id,release_reserved=qty)
         order.status='fulfilled'
+        cogs=sum(int(l.quantity*l.cost_snapshot) for l in lines)
+        postings=[]
+        if order.total:
+            postings.extend([('1200',int(order.total),0),('4000',0,int(order.total))])
+        if cogs:
+            postings.extend([('5000',cogs,0),('1300',0,cogs)])
+        if postings:
+            _post_journal(db,ctx,'sale-fulfill:'+order.id,'تحویل فروش '+order.number,postings)
         notification(db,ctx['tenant'],'سفارش آماده شد',f'سفارش {order.number} از انبار خارج شد.','sale')
     elif action=='cancel' and order.status in ('draft','confirmed'):
         if order.paid>0:raise HTTPException(409,'سفارش دارای پرداخت است؛ ابتدا استرداد را ثبت کنید')
@@ -592,7 +665,7 @@ def print_invoice(invoice_id:str,db:Session=Depends(db_session),ctx:dict=Depends
 def record_payment(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
     authorized(ctx,SALES|FINANCE)
     tid=ctx['tenant'];key=require_string(body.get('idempotency_key'),'شناسه یکتا',120)
-    v=positive(body.get('amount'),'مبلغ')
+    v=positive_amount(body.get('amount'),'مبلغ')
     sale_id=body.get('sale_id');purchase_id=body.get('purchase_id')
     existing=db.query(Payment).filter_by(tenant_id=tid,idempotency_key=key).first()
     if existing:
@@ -614,6 +687,13 @@ def record_payment(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=D
     if account_id:
         tenant_object(db,CashAccount,tid,account_id)
         db.add(AccountEntry(tenant_id=tid,account_id=account_id,direction='in' if sale_id else 'out',amount=v,reference=obj.id,note='دریافت سفارش' if sale_id else 'پرداخت خرید'))
+    cash_code='1020' if (account_id and db.get(CashAccount,account_id).type=='bank') else '1010'
+    if sale_id:
+        _post_journal(db,ctx,'payment:'+obj.id,'دریافت بابت فروش '+doc.number,
+                      [(cash_code,v,0),('1200',0,v)])
+    else:
+        _post_journal(db,ctx,'payment:'+obj.id,'پرداخت بابت خرید '+doc.number,
+                      [('2000',v,0),(cash_code,0,v)])
     if sale_id:
         notification(db,tid,'پرداخت موفق',f'پرداخت {v:,} تومان برای سفارش {doc.number} ثبت شد.','payment')
     audit(db,ctx,'record','payments',obj.id,{'amount':v})
@@ -653,7 +733,19 @@ def record_return(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=De
     if direction=='purchase':_stock(db,ctx,doc.warehouse_id,vid,-qty,'supplier_return',doc.id)
     elif restock:_stock(db,ctx,doc.warehouse_id,vid,qty,'customer_return',doc.id)
     obj=Return(tenant_id=tid,direction=direction,order_id=doc.id if direction=='sale' else None,purchase_id=doc.id if direction=='purchase' else None,variant_id=vid,warehouse_id=doc.warehouse_id,quantity=qty,amount=qty*(line.price if direction=='sale' else line.cost),restock=restock)
-    db.add(obj);db.flush();audit(db,ctx,'create','returns',obj.id)
+    db.add(obj);db.flush()
+    postings=[]
+    if obj.amount:
+        if direction=='sale':
+            postings.extend([('4100',obj.amount,0),('1200',0,obj.amount)])
+        else:
+            postings.extend([('2000',obj.amount,0),('1300',0,obj.amount)])
+    if direction=='sale' and restock and line.cost_snapshot>0:
+        value=qty*line.cost_snapshot
+        postings.extend([('1300',value,0),('5000',0,value)])
+    if postings:
+        _post_journal(db,ctx,'return:'+obj.id,'مرجوعی '+direction,postings)
+    audit(db,ctx,'create','returns',obj.id)
     if key:db.add(EventKey(tenant_id=tid,kind='return',key=key,reference_id=obj.id))
     try:db.commit()
     except IntegrityError:db.rollback();raise HTTPException(409,'درخواست مرجوعی تکراری است')
@@ -691,13 +783,17 @@ def settle_return(return_id:str,body:dict=Body(...),db:Session=Depends(db_sessio
     key=require_string(body.get('idempotency_key'),'شناسه یکتا',150)
     if db.query(EventKey).filter_by(tenant_id=tid,kind='return_settlement',key=key).first():
         raise HTTPException(409,'این تسویه قبلاً ثبت شده است')
-    value=positive(body.get('amount'),'مبلغ')
+    value=positive_amount(body.get('amount'),'مبلغ')
     if value>remaining:raise HTTPException(409,'مبلغ بیشتر از مانده قابل تسویه است')
     account=tenant_object(db,CashAccount,tid,body.get('account_id'))
     direction='out' if obj.direction=='sale' else 'in'
     entry=AccountEntry(tenant_id=tid,account_id=account.id,direction=direction,amount=value,
                        reference=obj.id,note='تسویه مرجوعی '+doc.number)
     db.add(entry);db.flush()
+    cash_code='1020' if account.type=='bank' else '1010'
+    postings=([('1200',value,0),(cash_code,0,value)] if obj.direction=='sale'
+              else [(cash_code,value,0),('2000',0,value)])
+    _post_journal(db,ctx,'return-settle:'+key,'تسویه مرجوعی '+doc.number,postings)
     db.add(EventKey(tenant_id=tid,kind='return_settlement',key=key,reference_id=obj.id))
     audit(db,ctx,'settle_return','returns',obj.id,{'amount':value,'account_id':account.id})
     notification(db,tid,'تسویه مرجوعی',f'تسویه {value:,} تومان برای {doc.number} ثبت شد.','finance')
@@ -852,3 +948,116 @@ def document_lines(kind:str,document_id:str,db:Session=Depends(db_session),ctx:d
     tenant_object(db,model,ctx['tenant'],document_id)
     lines=db.query(line_model).filter_by(tenant_id=ctx['tenant'],order_id=document_id).all()
     return {'items':[as_dict(l) for l in lines]}
+
+@app.get('/api/ledger/accounts')
+def ledger_accounts(db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE|{'viewer'})
+    accounts=db.query(LedgerAccount).filter_by(tenant_id=ctx['tenant']).order_by(LedgerAccount.code).all()
+    return {'items':[as_dict(x) for x in accounts],'total':len(accounts)}
+
+@app.post('/api/ledger/bootstrap')
+def ledger_bootstrap(db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE)
+    data=_ensure_ledger(db,ctx['tenant'])
+    db.commit()
+    return {'ok':True,'total':len(data)}
+
+@app.post('/api/ledger/accounts')
+def ledger_account_create(body:dict=Body(...),db:Session=Depends(db_session),
+                          ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE)
+    code=require_string(body.get('code'),'کد حساب',20)
+    name=require_string(body.get('name'),'نام حساب',180)
+    kind=body.get('kind')
+    if kind not in ('asset','liability','equity','revenue','expense'):
+        raise HTTPException(422,'نوع حساب نامعتبر است')
+    if not code.isdigit():raise HTTPException(422,'کد حساب فقط باید عدد باشد')
+    obj=LedgerAccount(tenant_id=ctx['tenant'],code=code,name=name,kind=kind,active=True)
+    db.add(obj);audit(db,ctx,'create','ledger_accounts',obj.id)
+    try:db.commit()
+    except IntegrityError:db.rollback();raise HTTPException(409,'کد حساب تکراری است')
+    return as_dict(obj)
+
+@app.get('/api/ledger/journals')
+def ledger_journals(page:int=Query(1,ge=1,le=100000),limit:int=Query(40,ge=1,le=100),
+                    start:date|None=None,end:date|None=None,
+                    db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE|{'viewer'})
+    q=db.query(Journal).filter_by(tenant_id=ctx['tenant'])
+    if start:q=q.filter(Journal.journal_date>=start)
+    if end:q=q.filter(Journal.journal_date<=end)
+    total=q.count()
+    entries=q.order_by(Journal.journal_date.desc(),Journal.created_at.desc()).offset(
+        (page-1)*limit).limit(limit).all()
+    return {'items':[as_dict(x) for x in entries],'page':page,'limit':limit,'total':total}
+
+@app.get('/api/ledger/journals/{entry_id}')
+def ledger_journal(entry_id:str,db:Session=Depends(db_session),
+                   ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE|{'viewer'})
+    doc=tenant_object(db,Journal,ctx['tenant'],entry_id)
+    lines=db.query(JournalLine).filter_by(tenant_id=ctx['tenant'],journal_id=doc.id).all()
+    return {'journal':as_dict(doc),'lines':[as_dict(x) for x in lines]}
+
+@app.post('/api/ledger/journals')
+def ledger_journal_create(body:dict=Body(...),db:Session=Depends(db_session),
+                          ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE)
+    key=require_string(body.get('idempotency_key'),'شناسه یکتا',150)
+    source='manual:'+key
+    if db.query(Journal).filter_by(tenant_id=ctx['tenant'],source_key=source).first():
+        raise HTTPException(409,'این سند قبلاً ثبت شده است')
+    raw=body.get('lines')
+    if not isinstance(raw,list) or len(raw)<2 or len(raw)>50:
+        raise HTTPException(422,'سند باید بین ۲ تا ۵۰ ردیف داشته باشد')
+    lines=[]
+    for item in raw:
+        if not isinstance(item,dict):raise HTTPException(422,'ردیف نامعتبر')
+        account=tenant_object(db,LedgerAccount,ctx['tenant'],item.get('account_id'))
+        if not account.active:raise HTTPException(409,'حساب غیرفعال')
+        debit=amount(item.get('debit',0),'بدهکار')
+        credit=amount(item.get('credit',0),'بستانکار')
+        lines.append((account.code,debit,credit))
+    memo=require_string(body.get('memo'),'شرح سند',900)
+    doc=_post_journal(db,ctx,source,memo,lines)
+    audit(db,ctx,'create','journals',doc.id)
+    try:db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,'شماره یا شناسه سند تکراری است')
+    return {'journal':as_dict(doc),'total':sum(line[1] for line in lines)}
+
+@app.get('/api/ledger/trial-balance')
+def trial_balance(start:date|None=None,end:date|None=None,
+                  db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE|{'viewer'})
+    tid=ctx['tenant']
+    accounts=db.query(LedgerAccount).filter_by(tenant_id=tid).order_by(LedgerAccount.code).all()
+    qry=db.query(JournalLine,Journal).join(Journal,JournalLine.journal_id==Journal.id).filter(
+        JournalLine.tenant_id==tid,Journal.tenant_id==tid)
+    if start:qry=qry.filter(Journal.journal_date>=start)
+    if end:qry=qry.filter(Journal.journal_date<=end)
+    sums={}
+    for line,_ in qry.all():
+        current=sums.setdefault(line.account_id,[0,0])
+        current[0]+=line.debit;current[1]+=line.credit
+    items=[{**as_dict(a),'debit':sums.get(a.id,[0,0])[0],
+             'credit':sums.get(a.id,[0,0])[1],
+             'balance':sums.get(a.id,[0,0])[0]-sums.get(a.id,[0,0])[1]}
+             for a in accounts]
+    debits=sum(x['debit'] for x in items);credits=sum(x['credit'] for x in items)
+    return {'items':items,'total_debit':debits,'total_credit':credits,
+            'balanced':debits==credits,'start':start.isoformat() if start else None,
+            'end':end.isoformat() if end else None}
+
+@app.get('/api/ledger/profit-loss')
+def profit_loss(start:date|None=None,end:date|None=None,
+                db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE|{'viewer'})
+    balance=trial_balance(start,end,db,ctx)
+    rev=sum(a['credit']-a['debit'] for a in balance['items'] if a['kind']=='revenue')
+    expenses=sum(a['debit']-a['credit'] for a in balance['items'] if a['kind']=='expense')
+    return {'revenue':rev,'expenses':expenses,'net_profit':rev-expenses,
+            'balanced':balance['balanced'],'currency':'TOMAN',
+            'account_totals':[x for x in balance['items']
+                if x['kind'] in ('revenue','expense')]}
