@@ -141,6 +141,10 @@ def positive(value,name='تعداد'):
     if type(value) is not int or value<=0 or value>1_000_000:
         raise HTTPException(422,f'{name} باید عدد صحیح مثبت باشد')
     return value
+def positive_amount(value,name='مبلغ'):
+    amount(value,name)
+    if value==0:raise HTTPException(422,f'{name} باید بیشتر از صفر باشد')
+    return value
 
 def require_string(value,label='مقدار',maxlen=200):
     if not isinstance(value,str) or not 0 < len(value.strip()) <= maxlen:
@@ -661,7 +665,7 @@ def print_invoice(invoice_id:str,db:Session=Depends(db_session),ctx:dict=Depends
 def record_payment(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
     authorized(ctx,SALES|FINANCE)
     tid=ctx['tenant'];key=require_string(body.get('idempotency_key'),'شناسه یکتا',120)
-    v=positive(body.get('amount'),'مبلغ')
+    v=positive_amount(body.get('amount'),'مبلغ')
     sale_id=body.get('sale_id');purchase_id=body.get('purchase_id')
     existing=db.query(Payment).filter_by(tenant_id=tid,idempotency_key=key).first()
     if existing:
@@ -779,7 +783,7 @@ def settle_return(return_id:str,body:dict=Body(...),db:Session=Depends(db_sessio
     key=require_string(body.get('idempotency_key'),'شناسه یکتا',150)
     if db.query(EventKey).filter_by(tenant_id=tid,kind='return_settlement',key=key).first():
         raise HTTPException(409,'این تسویه قبلاً ثبت شده است')
-    value=positive(body.get('amount'),'مبلغ')
+    value=positive_amount(body.get('amount'),'مبلغ')
     if value>remaining:raise HTTPException(409,'مبلغ بیشتر از مانده قابل تسویه است')
     account=tenant_object(db,CashAccount,tid,body.get('account_id'))
     direction='out' if obj.direction=='sale' else 'in'
