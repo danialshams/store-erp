@@ -13,7 +13,7 @@ const NAV=[
  ['نمای کلی',[['dashboard','داشبورد','grid'],['notifications','اعلان‌ها','bell']]],
  ['کالا و موجودی',[['products','کالاها','box'],['variants','تنوع و قیمت','layers'],['categories','دسته‌بندی‌ها','tag'],['warehouses','انبارها','warehouse'],['stocks','موجودی کالا','box'],['batches','بچ و تاریخ انقضا','layers'],['movements','گردش انبار','swap'],['cycle-count','انبارگردانی','check'],['transfers','انتقال بین انبارها','swap']]],
  ['خرید و فروش',[['suppliers','تأمین‌کنندگان','truck'],['purchases','سفارش‌های خرید','cart'],['customers','مشتریان','users'],['sales','فروش و سفارش‌ها','cart'],['returns','مرجوعی‌ها','returns'],['shipments','ارسال و رهگیری','truck']]],
- ['امور مالی',[['invoices','فاکتورهای فروش','file'],['payments','پرداخت‌ها','coins'],['cash-accounts','حساب‌ها','card'],['account-entries','گردش حساب‌ها','file'],['price-lists','لیست‌های قیمت','tag'],['price-items','قیمت‌های اختصاصی','tag'],['tax-rates','مالیات‌ها','file'],['reports','گزارش‌ها','chart']]],
+ ['امور مالی',[['invoices','فاکتورهای فروش','file'],['payments','پرداخت‌ها','coins'],['cash-accounts','حساب‌ها','card'],['ledger-accounts','کدینگ حسابداری','layers'],['ledger-journals','اسناد حسابداری','file'],['ledger-balance','تراز آزمایشی','chart'],['ledger-profit','سود و زیان','chart'],['account-entries','گردش حساب‌ها','file'],['price-lists','لیست‌های قیمت','tag'],['price-items','قیمت‌های اختصاصی','tag'],['tax-rates','مالیات‌ها','file'],['reports','گزارش‌ها','chart']]],
  ['مدیریت',[['team','کاربران و دسترسی','users'],['settings','تنظیمات کسب‌وکار','settings'],['audit','تاریخچه عملیات','clock']]]
 ];
 const LABELS={id:'شناسه',name:'نام',sku:'کد کالا',code:'کد انبار',barcode:'بارکد',unit:'واحد',description:'توضیحات',category_id:'دسته‌بندی',product_id:'کالا',warehouse_id:'انبار',variant_id:'تنوع کالا',supplier_id:'تأمین‌کننده',customer_id:'مشتری',group_name:'گروه',price:'قیمت',purchase_cost:'بهای خرید',retail_price:'قیمت فروش',wholesale_price:'قیمت عمده',low_stock:'حد هشدار',quantity:'تعداد',reserved:'رزروشده',delta:'تغییر',number:'شماره',status:'وضعیت',total:'مبلغ کل',paid:'پرداخت‌شده',discount:'تخفیف',channel:'کانال فروش',phone:'تلفن',email:'ایمیل',address:'نشانی',notes:'توضیحات',active:'فعال',archived:'آرشیو',read:'خوانده شده',amount:'مبلغ',method:'روش',reference_id:'مرجع',created_at:'تاریخ',carrier:'شرکت حمل',tracking_number:'کد رهگیری',role:'نقش',opening_balance:'موجودی اولیه',percentage:'درصد',title:'عنوان',body:'متن',category:'نوع',reason:'علت',source_id:'انبار مبدأ',destination_id:'انبار مقصد',direction:'جهت',restock:'بازگشت به موجودی',expiry_date:'تاریخ انقضا',lot:'سری ساخت',order_id:'سفارش',purchase_id:'خرید',list_id:'لیست قیمت',actor_id:'کاربر',entity:'موجودیت',action:'عملیات',credit_limit:'سقف اعتبار',track_batch:'ردیابی بچ',track_serial:'ردیابی سریال',image_url:'آدرس تصویر'};
@@ -107,6 +107,7 @@ async function loadView(){
    if(state.view==='dashboard')await renderDashboard();
    else if(state.view==='invoices')await renderInvoices();
    else if(state.view==='reports')await renderReports();
+   else if(state.view.startsWith('ledger-'))await renderLedger();
    else if(state.view==='cycle-count')await renderCycleCount();
    else if(state.view==='settings')await renderSettings();
    else if(state.view==='team')await renderTeam();
@@ -350,6 +351,88 @@ async function openIssueInvoice(){
  },{save:'صدور فاکتور'});
 }
 
+const LEDGER_KINDS={asset:'دارایی',liability:'بدهی',equity:'سرمایه',revenue:'درآمد',expense:'هزینه'};
+async function renderLedger(){
+ const v=state.view;
+ const main=$('#page-content');
+ const canWrite=roleCan('cash-accounts');
+ if(v==='ledger-accounts'){
+  const data=await api('ledger/accounts');
+  main.innerHTML=`${head('کدینگ حسابداری','دفتر کل بر پایه ثبت دوطرفه در واحد تومان',
+   canWrite?`<button class="btn btn-primary" id="ledger-new-account">حساب جدید ${icon('plus',16)}</button>`:'')}
+   ${!data.total&&canWrite?`<button class="btn btn-outline" id="ledger-setup">ساخت کدینگ استاندارد ${icon('plus',15)}</button>`:''}
+   <div class="panel"><div class="table-wrap"><table class="table"><thead><tr><th>کد</th><th>نام حساب</th><th>ماهیت</th><th>وضعیت</th></tr></thead>
+   <tbody>${data.items.map(a=>`<tr><td>${esc(a.code)}</td><td>${esc(a.name)}</td><td>${esc(LEDGER_KINDS[a.kind]||a.kind)}</td><td>${a.active?'فعال':'غیرفعال'}</td></tr>`).join('')}
+   </tbody></table></div></div>`;
+ }else if(v==='ledger-journals'){
+  const result=await api('ledger/journals?page='+state.page+'&limit=40');
+  main.innerHTML=`${head('اسناد حسابداری','اسناد ثبت‌شده تغییرناپذیر هستند و باید تراز باشند',
+   canWrite?`<button class="btn btn-primary" id="ledger-new-journal">سند جدید ${icon('plus',16)}</button>`:'')}
+   <div class="panel"><div class="table-wrap"><table class="table"><thead><tr><th>شماره سند</th><th>تاریخ</th><th>شرح</th><th>عملیات</th></tr></thead>
+   <tbody>${result.items.map(j=>`<tr><td>${esc(j.number)}</td><td>${dateFa(j.journal_date)}</td><td>${esc(j.memo)}</td>
+   <td><button class="btn btn-small btn-outline" data-journal-detail="${esc(j.id)}">مشاهده ردیف‌ها ${icon('file',14)}</button></td></tr>`).join('')}</tbody></table></div>
+   <div class="pagination"><span>${fa(result.total)} سند · صفحه ${fa(state.page)}</span>
+   <div class="row"><button class="btn btn-small btn-outline" id="ledger-prev" ${state.page<=1?'disabled':''}>قبلی</button>
+   <button class="btn btn-small btn-outline" id="ledger-next" ${state.page*40>=result.total?'disabled':''}>بعدی</button></div></div></div>`;
+ }else if(v==='ledger-balance'){
+  const data=await api('ledger/trial-balance');
+  main.innerHTML=`${head('تراز آزمایشی','جمع ستون‌های بدهکار و بستانکار باید برابر باشد')}
+   <div class="metric-grid"><div class="panel metric-card"><div class="label">جمع بدهکار</div><strong class="num">${money(data.total_debit)}</strong></div>
+   <div class="panel metric-card"><div class="label">جمع بستانکار</div><strong class="num">${money(data.total_credit)}</strong></div>
+   <div class="panel metric-card"><div class="label">وضعیت تراز</div><strong class="num">${data.balanced?'متوازن':'نامتوازن'}</strong></div></div>
+   <div class="panel"><div class="table-wrap"><table class="table"><thead><tr><th>حساب</th><th>نام</th><th>بدهکار</th><th>بستانکار</th><th>مانده</th></tr></thead>
+   <tbody>${data.items.map(x=>`<tr><td>${esc(x.code)}</td><td>${esc(x.name)}</td><td>${money(x.debit)}</td>
+   <td>${money(x.credit)}</td><td>${money(x.balance)}</td></tr>`).join('')}</tbody></table></div></div>`;
+ }else if(v==='ledger-profit'){
+  const p=await api('ledger/profit-loss');
+  main.innerHTML=`${head('صورت سود و زیان','بر اساس اسناد قطعی دوطرفه؛ همه اعداد به تومان')}
+   <div class="metric-grid"><div class="panel metric-card"><div class="label">درآمد خالص</div><strong class="num">${money(p.revenue)}</strong></div>
+   <div class="panel metric-card"><div class="label">جمع هزینه‌ها</div><strong class="num">${money(p.expenses)}</strong></div>
+   <div class="panel metric-card"><div class="label">سود/زیان خالص</div><strong class="num">${money(p.net_profit)}</strong></div></div>
+   <div class="panel"><div class="table-wrap"><table class="table"><thead><tr><th>کد</th><th>حساب</th><th>طبقه</th><th>مانده</th></tr></thead>
+   <tbody>${p.account_totals.map(a=>`<tr><td>${esc(a.code)}</td><td>${esc(a.name)}</td>
+   <td>${esc(LEDGER_KINDS[a.kind]||a.kind)}</td><td>${money(a.balance)}</td></tr>`).join('')}</tbody></table></div></div>
+   <p class="hint">داده‌های نمونه برای نمایش نحوه محاسبه هستند. گزارش مالیاتی رسمی نیازمند تنظیمات قانونی کسب‌وکار است.</p>`;
+ }
+}
+async function openLedgerDetails(id){
+ const [doc,accts]=await Promise.all([api('ledger/journals/'+encodeURIComponent(id)),api('ledger/accounts')]);
+ const byId=Object.fromEntries(accts.items.map(a=>[a.id,a]));
+ const rows=doc.lines.map(x=>`<tr><td>${esc(byId[x.account_id]?.code||'—')}</td><td>${esc(byId[x.account_id]?.name||'—')}</td>
+ <td>${money(x.debit)}</td><td>${money(x.credit)}</td></tr>`).join('');
+ showModal('سند '+doc.journal.number,`<div class="notice">${esc(doc.journal.memo)} · ${dateFa(doc.journal.journal_date)}</div>
+ <div class="table-wrap" style="margin-top:16px"><table class="table"><thead><tr><th>کد</th><th>حساب</th><th>بدهکار</th><th>بستانکار</th></tr></thead>
+ <tbody>${rows}</tbody></table></div>`,async()=>closeModal(),{save:'بستن'});
+}
+function openLedgerAccount(){
+ showModal('حساب جدید',`<div class="form-grid"><div class="field"><label>کد حساب</label><input class="input" name="code" pattern="[0-9]+" required maxlength="20"></div>
+ <div class="field"><label>نام حساب</label><input class="input" name="name" required maxlength="180"></div>
+ <div class="field full"><label>ماهیت حساب</label>${selectField('kind',Object.entries(LEDGER_KINDS).map(([id,label])=>({id,label})))}</div></div>`,
+ async form=>{const f=new FormData(form);await api('ledger/accounts',{method:'POST',body:{code:f.get('code'),name:f.get('name'),kind:f.get('kind')}});
+ closeModal();notify('حساب جدید ثبت شد');renderLedger()},{save:'ثبت حساب'});
+}
+async function openLedgerJournal(){
+ const {items:accounts}=await api('ledger/accounts');
+ if(accounts.length<2)return notify('ابتدا حساب‌های دفتر کل را ایجاد کنید',true);
+ const choose=(key)=>selectField(key,accounts.map(x=>({id:x.id,label:x.code+' - '+x.name})));
+ const content=`<div class="notice">سند باید جمع بدهکار و بستانکار یکسان داشته باشد. پس از ثبت، تغییر نمی‌کند.</div>
+ <div class="field" style="margin-top:14px"><label>شرح سند</label><input class="input" name="memo" required maxlength="900"></div>
+ <div class="form-grid" style="margin-top:16px">
+ <div class="field full"><strong>ردیف بدهکار</strong></div><div class="field full">${choose('account_debit')}</div>
+ <div class="field"><label>مبلغ بدهکار (تومان)</label><input class="input" type="number" name="debit" min="1" step="1" required></div>
+ <div class="field full"><strong>ردیف بستانکار</strong></div><div class="field full">${choose('account_credit')}</div>
+ <div class="field"><label>مبلغ بستانکار (تومان)</label><input class="input" type="number" name="credit" min="1" step="1" required></div></div>`;
+ showModal('ثبت سند حسابداری',content,async form=>{
+  const f=new FormData(form),debit=Number(f.get('debit')),credit=Number(f.get('credit'));
+  if(!Number.isSafeInteger(debit)||!Number.isSafeInteger(credit)||debit<=0||debit!==credit)throw Error('مبلغ دو طرف باید صحیح، مثبت و برابر باشد');
+  const lines=[{account_id:f.get('account_debit'),debit,credit:0},
+               {account_id:f.get('account_credit'),debit:0,credit}];
+  if(lines[0].account_id===lines[1].account_id)throw Error('حساب بدهکار و بستانکار باید متفاوت باشند');
+  await api('ledger/journals',{method:'POST',body:{memo:f.get('memo'),lines,idempotency_key:uid()}});
+  closeModal();notify('سند تراز ثبت شد');renderLedger();
+ },{save:'ثبت سند'});
+}
+
 async function renderReports(){
  const report=await api('reports?type='+state.report);
  state.data.reportRows=report.rows;
@@ -409,6 +492,12 @@ root.addEventListener('click',async e=>{
   if(state.view==='purchases'||state.view==='sales')return openDocument(state.view);
   return openGeneric(state.view);
  }
+ if(btn.id==='ledger-new-account')return openLedgerAccount();
+ if(btn.id==='ledger-setup'){await api('ledger/bootstrap',{method:'POST',body:{}});notify('حساب‌ها ایجاد شدند');return renderLedger()}
+ if(btn.id==='ledger-new-journal')return openLedgerJournal();
+ if(btn.hasAttribute('data-journal-detail'))return openLedgerDetails(btn.dataset.journalDetail);
+ if(btn.id==='ledger-prev'){state.page=Math.max(1,state.page-1);return renderLedger()}
+ if(btn.id==='ledger-next'){state.page++;return renderLedger()}
  if(btn.id==='issue-invoice')return openIssueInvoice();
  if(btn.id==='invoice-prev'){state.page=Math.max(1,state.page-1);return renderInvoices()}
  if(btn.id==='invoice-next'){state.page++;return renderInvoices()}
@@ -499,7 +588,7 @@ modals.addEventListener('submit',async e=>{
 });
 window.addEventListener('keydown',e=>{if(e.key==='Escape'&&modals.innerHTML)closeModal()});
 async function boot(){
- try{state.me=await api('auth/me');await maybeAcceptInvite();renderShell();const hash=location.hash.slice(1);state.view=(hash==='dashboard'||META[hash]||['reports','settings','team','cycle-count','invoices'].includes(hash))?hash:'dashboard';setView(state.view)}
+ try{state.me=await api('auth/me');await maybeAcceptInvite();renderShell();const hash=location.hash.slice(1);state.view=(hash==='dashboard'||META[hash]||['reports','settings','team','cycle-count','invoices','ledger-accounts','ledger-journals','ledger-balance','ledger-profit'].includes(hash))?hash:'dashboard';setView(state.view)}
  catch{renderAuth()}
 }
 boot();
