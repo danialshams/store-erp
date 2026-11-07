@@ -31,6 +31,7 @@ BEGIN
  FOREACH tab IN ARRAY ARRAY['ledger_accounts','journals','journal_lines']
  LOOP
   EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',tab);
+  EXECUTE format('DROP POLICY IF EXISTS erp_tenant_guard ON public.%I',tab);
   EXECUTE format(
    'CREATE POLICY erp_tenant_guard ON public.%I FOR ALL TO PUBLIC USING (tenant_id = current_setting(''erp.tenant_id'',true)) WITH CHECK (tenant_id = current_setting(''erp.tenant_id'',true))',tab);
  END LOOP;
