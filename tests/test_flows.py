@@ -266,6 +266,20 @@ def test_public_showroom_is_isolated_and_read_only(monkeypatch):
     assert real.get('/api/auth/me').json()['tenant_id']==real_user['tenant_id']
     assert real.post('/api/data/products',json={'name':'دومین کالای خصوصی'}).status_code==200
     assert anonymous.get('/api/data/products').json()['total']==1
+    assert anonymous.get('/api/public-mode').json()=={'enabled':True,'mode':'read-only'}
+
+    # Returning visitors may still have a stale, expired, or forged cookie;
+    # they must be shown the public showroom, never a sign-in page.
+    anonymous.cookies.set('erp_session','expired.invalid')
+    stale=anonymous.get('/api/auth/me')
+    assert stale.status_code==200,stale.text
+    assert stale.json()['public_demo'] is True
+    assert anonymous.get('/api/data/products').json()['total']==1
+    assert anonymous.post('/api/data/products',json={'name':'bad-change'}).status_code in (401,403)
+    assert real.get('/api/auth/me').json()['public_demo'] is False
+    monkeypatch.setenv('PUBLIC_DEMO_ENABLED','false')
+    assert anonymous.get('/api/auth/me').status_code==401
+    assert anonymous.get('/api/public-mode').json()=={'enabled':False,'mode':'private'}
 
 
 def test_double_entry_finance_posting_and_tenant_scoping():
