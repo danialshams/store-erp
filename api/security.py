@@ -6,8 +6,11 @@ from .models import User, Member
 
 SECRET=os.environ.get('APP_SECRET', '')
 if not SECRET:
-    if os.environ.get('VERCEL'): raise RuntimeError('APP_SECRET required in deployment')
+    if os.environ.get('VERCEL') or os.environ.get('APP_ENV') == 'production' or os.environ.get('DATABASE_URL', '').startswith(('postgres:', 'postgresql:')):
+        raise RuntimeError('APP_SECRET is required for deployed or PostgreSQL installations')
     SECRET='dev-only-not-for-production'
+if (os.environ.get('VERCEL') or os.environ.get('APP_ENV') == 'production' or os.environ.get('DATABASE_URL', '').startswith(('postgres:', 'postgresql:'))) and (len(SECRET) < 32 or SECRET.startswith('replace-with')):
+    raise RuntimeError('APP_SECRET must be a securely generated value of at least 32 characters')
 ROLES=['owner','admin','inventory_manager','sales','accountant','viewer']
 ALL=set(ROLES)
 CATALOG={'owner','admin','inventory_manager'}

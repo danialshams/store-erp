@@ -26,7 +26,12 @@ app.mount('/assets',StaticFiles(directory=str(PUBLIC)),name='assets')
 @app.middleware('http')
 async def safety_middleware(request:Request,call_next):
     if request.url.path.startswith('/api/'):
-        csrf_guard(request)
+        try:
+            csrf_guard(request)
+        except HTTPException as exc:
+            # Middleware executes outside FastAPI's exception handler; returning
+            # a response here avoids a misleading 500 on rejected origins.
+            return JSONResponse({'detail': exc.detail}, status_code=exc.status_code)
     response=await call_next(request)
     response.headers['X-Content-Type-Options']='nosniff'
     response.headers['X-Frame-Options']='DENY'
