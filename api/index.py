@@ -502,7 +502,8 @@ def cycle_sheet(warehouse_id:str,page:int=Query(1,ge=1,le=100000),
     return {'warehouse_id':warehouse_id,'page':page,'total':total,
             'items':[{'variant_id':v.id,'sku':v.sku,'name':v.name,
                       'quantity':by_variant[v.id].quantity if v.id in by_variant else 0,
-                      'reserved':by_variant[v.id].reserved if v.id in by_variant else 0}
+                      'reserved':by_variant[v.id].reserved if v.id in by_variant else 0,
+                      'track_batch':v.track_batch,'track_serial':v.track_serial}
                      for v in variants]}
 
 @app.post('/api/stock/cycle-count')
@@ -529,9 +530,9 @@ def cycle_count(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depe
             raise HTTPException(422,'تعداد شمارش‌شده نامعتبر است')
         if type(expected) is not int or expected<0 or expected>1_000_000:
             raise HTTPException(422,'موجودی مبنای شمارش نامعتبر است')
-        checked.append((vid,counted,expected))
-    cycle_id=str(uuid4());result=[]
-    for vid,counted,expected in sorted(checked):
+        checked.append((vid,counted,expected,item.get('lot'),item.get('expiry_date'),item.get('serials')))
+    cycle_id=str(uuid4());result=[];increased=0;decreased=0
+    for vid,counted,expected,lot,expiry,serials in sorted(checked,key=lambda x:x[0]):
         if db.bind.dialect.name=='postgresql':
             db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{'key':tid+':'+warehouse_id+':'+vid})
         row=db.query(Stock).filter_by(tenant_id=tid,warehouse_id=warehouse_id,variant_id=vid).with_for_update().first()
@@ -542,8 +543,16 @@ def cycle_count(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depe
         delta=counted-current
         if delta:
             _stock(db,ctx,warehouse_id,vid,delta,'cycle_count',cycle_id,
-                   note='ثبت انبارگردانی با مبنای موجودی '+str(expected))
+                   note='ثبت انبارگردانی با مبنای موجودی '+str(expected),
+                   lot=lot,expiry_date=expiry,serials=serials)
+            cost=tenant_object(db,Variant,tid,vid).purchase_cost
+            if delta>0:increased+=delta*cost
+            else:decreased+=-delta*cost
         result.append({'variant_id':vid,'previous':current,'counted':counted,'difference':delta})
+    postings=[]
+    if increased:postings.extend([('1300',increased,0),('3000',0,increased)])
+    if decreased:postings.extend([('6000',decreased,0),('1300',0,decreased)])
+    if postings:_post_journal(db,ctx,'cycle-count:'+cycle_id,'ثبت مغایرت انبارگردانی',postings)
     db.add(EventKey(tenant_id=tid,kind='cycle_count',key=key,reference_id=cycle_id))
     audit(db,ctx,'cycle_count','stocks',cycle_id,{'warehouse_id':warehouse_id,'items':result})
     try:db.commit()
