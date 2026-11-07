@@ -39,6 +39,25 @@ jobs:
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0002_invoices.sql
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0003_seed_public_demo.sql
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0003_seed_public_demo.sql
+          psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 <<'SQL'
+          BEGIN;
+          INSERT INTO tenants (id,name,currency,created_at) VALUES
+            ('ci-other-tenant','Other Tenant','TOMAN',NOW());
+          INSERT INTO categories (id,tenant_id,name,created_at) VALUES
+            ('ci-other-cat','ci-other-tenant','Other Category',NOW());
+          DO $block$
+          BEGIN
+            BEGIN
+              INSERT INTO products (id,tenant_id,name,category_id,active,archived,created_at)
+              VALUES('ci-forged-product','demo-erp-tenant-2026','Cross tenant',
+                     'ci-other-cat',true,false,NOW());
+              RAISE EXCEPTION 'Cross-tenant FK accepted invalid relationship';
+            EXCEPTION WHEN foreign_key_violation THEN
+              NULL;
+            END;
+          END $block$;
+          ROLLBACK;
+          SQL
           python -c "from api.db import engine; from sqlalchemy import inspect; n=len(inspect(engine).get_table_names()); print(f'PostgreSQL tables: {n}'); assert n >= 41"
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0004_tenant_rls.sql
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0005_finance_ledger.sql
@@ -52,6 +71,7 @@ jobs:
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0012_partial_fulfillment.sql
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0013_seed_fulfillments_demo.sql
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0013_seed_fulfillments_demo.sql
+          psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0014_tenant_integrity.sql
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0010_seed_traceability_demo.sql
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 <<'SQL'
           CREATE ROLE erp_rls_test;
