@@ -64,7 +64,7 @@ def authorized(ctx,roles):
 
 def csrf_guard(request: Request):
     if request.method in ('POST','PATCH','PUT','DELETE'):
-        # Browsers supply Fetch Metadata even when Origin is omitted. Reject\n        # cross-site mutations before session-cookie authentication.\n        site=request.headers.get('sec-fetch-site', '').lower()\n        if site in ('cross-site', 'none') and site == 'cross-site':\n            raise HTTPException(403,'درخواست از مبدأ غیرمجاز')\n        origin=request.headers.get('origin')
+        # Browsers supply Fetch Metadata even when Origin is omitted. Reject\n        # cross-site mutations before session-cookie authentication.\n        site=request.headers.get('sec-fetch-site', '').lower()\n        if site == 'cross-site':\n            raise HTTPException(403,'درخواست از مبدأ غیرمجاز')\n        origin=request.headers.get('origin')
         if origin:
             host=request.headers.get('host','')
             from urllib.parse import urlparse
