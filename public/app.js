@@ -11,10 +11,10 @@ const ICON={grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y=
 function icon(name,size=18){return `<span class="icon"><svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[name]||ICON.box}</svg></span>`}
 const NAV=[
  ['نمای کلی',[['dashboard','داشبورد','grid'],['notifications','اعلان‌ها','bell']]],
- ['کالا و موجودی',[['products','کالاها','box'],['variants','تنوع و قیمت','layers'],['categories','دسته‌بندی‌ها','tag'],['warehouses','انبارها','warehouse'],['stocks','موجودی کالا','box'],['batches','بچ و تاریخ انقضا','layers'],['movements','گردش انبار','swap'],['cycle-count','انبارگردانی','check'],['transfers','انتقال بین انبارها','swap']]],
+ ['کالا و موجودی',[['products','کالاها','box'],['variants','تنوع و قیمت','layers'],['categories','دسته‌بندی‌ها','tag'],['warehouses','انبارها','warehouse'],['stocks','موجودی کالا','box'],['batches','بچ و تاریخ انقضا','layers'],['expiry-alerts','هشدار انقضا','bell'],['movements','گردش انبار','swap'],['cycle-count','انبارگردانی','check'],['transfers','انتقال بین انبارها','swap']]],
  ['خرید و فروش',[['suppliers','تأمین‌کنندگان','truck'],['purchases','سفارش‌های خرید','cart'],['customers','مشتریان','users'],['sales','فروش و سفارش‌ها','cart'],['returns','مرجوعی‌ها','returns'],['shipments','ارسال و رهگیری','truck']]],
- ['امور مالی',[['invoices','فاکتورهای فروش','file'],['payments','پرداخت‌ها','coins'],['cash-accounts','حساب‌ها','card'],['ledger-accounts','کدینگ حسابداری','layers'],['ledger-journals','اسناد حسابداری','file'],['ledger-balance','تراز آزمایشی','chart'],['ledger-profit','سود و زیان','chart'],['account-entries','گردش حساب‌ها','file'],['price-lists','لیست‌های قیمت','tag'],['price-items','قیمت‌های اختصاصی','tag'],['tax-rates','مالیات‌ها','file'],['reports','گزارش‌ها','chart']]],
- ['مدیریت',[['team','کاربران و دسترسی','users'],['settings','تنظیمات کسب‌وکار','settings'],['audit','تاریخچه عملیات','clock']]]
+ ['امور مالی',[['invoices','فاکتورهای فروش','file'],['payments','پرداخت‌ها','coins'],['cash-accounts','حساب‌ها','card'],['ledger-accounts','کدینگ حسابداری','layers'],['ledger-journals','اسناد حسابداری','file'],['ledger-balance','تراز آزمایشی','chart'],['ledger-profit','سود و زیان','chart'],['account-entries','گردش حساب‌ها','file'],['price-lists','لیست‌های قیمت','tag'],['price-items','قیمت‌های اختصاصی','tag'],['tax-rates','مالیات‌ها','file'],['reports','گزارش‌ها','chart'],['analytics','تحلیل پیشرفته','chart']]],
+ ['مدیریت',[['team','کاربران و دسترسی','users'],['settings','تنظیمات کسب‌وکار','settings'],['integrations','اتصالات آینده','settings'],['audit','تاریخچه عملیات','clock']]]
 ];
 const LABELS={id:'شناسه',name:'نام',sku:'کد کالا',code:'کد انبار',barcode:'بارکد',unit:'واحد',description:'توضیحات',category_id:'دسته‌بندی',product_id:'کالا',warehouse_id:'انبار',variant_id:'تنوع کالا',supplier_id:'تأمین‌کننده',customer_id:'مشتری',group_name:'گروه',price:'قیمت',purchase_cost:'بهای خرید',retail_price:'قیمت فروش',wholesale_price:'قیمت عمده',low_stock:'حد هشدار',quantity:'تعداد',reserved:'رزروشده',delta:'تغییر',number:'شماره',status:'وضعیت',total:'مبلغ کل',paid:'پرداخت‌شده',discount:'تخفیف',channel:'کانال فروش',phone:'تلفن',email:'ایمیل',address:'نشانی',notes:'توضیحات',active:'فعال',archived:'آرشیو',read:'خوانده شده',amount:'مبلغ',method:'روش',reference_id:'مرجع',created_at:'تاریخ',carrier:'شرکت حمل',tracking_number:'کد رهگیری',role:'نقش',opening_balance:'موجودی اولیه',percentage:'درصد',title:'عنوان',body:'متن',category:'نوع',reason:'علت',source_id:'انبار مبدأ',destination_id:'انبار مقصد',direction:'جهت',restock:'بازگشت به موجودی',expiry_date:'تاریخ انقضا',lot:'سری ساخت',order_id:'سفارش',purchase_id:'خرید',list_id:'لیست قیمت',actor_id:'کاربر',entity:'موجودیت',action:'عملیات',credit_limit:'سقف اعتبار',track_batch:'ردیابی بچ',track_serial:'ردیابی سریال',image_url:'آدرس تصویر'};
 const NUMERIC=new Set(['purchase_cost','retail_price','wholesale_price','low_stock','credit_limit','price','opening_balance','percentage','quantity','delta','discount']);
@@ -107,6 +107,9 @@ async function loadView(){
    if(state.view==='dashboard')await renderDashboard();
    else if(state.view==='invoices')await renderInvoices();
    else if(state.view==='reports')await renderReports();
+   else if(state.view==='analytics')await renderAnalytics();
+   else if(state.view==='expiry-alerts')await renderExpiryAlerts();
+   else if(state.view==='integrations')await renderIntegrations();
    else if(state.view.startsWith('ledger-'))await renderLedger();
    else if(state.view==='cycle-count')await renderCycleCount();
    else if(state.view==='settings')await renderSettings();
@@ -178,7 +181,8 @@ async function renderResource(){
  const url=`data/${resource}?page=${state.page}&limit=25&search=${encodeURIComponent(state.search)}`;
  const result=await api(url);state.data[resource]=result.items;
  const btn=(resource==='stocks'&&roleCan('stocks'))?`<button class="btn btn-primary" id="adjust-stock">اصلاح موجودی ${icon('plus',17)}</button>`:(!meta.readonly&&roleCan(resource))?`<button class="btn btn-primary" id="new-record">${meta.special==='sale'?'سفارش جدید':meta.special==='purchase'?'سفارش خرید جدید':meta.special==='transfer'?'انتقال جدید':(CREATE_LABEL[resource]||titleOf(resource)+' جدید')} ${icon('plus',17)}</button>`:'';
- const headHtml=head(titleOf(resource),`مشاهده و مدیریت اطلاعات ${titleOf(resource)} در سازمان شما`,btn);
+ const csvLink=`<a class="btn btn-outline" href="/api/export/${encodeURIComponent(resource)}.csv" target="_blank" rel="noopener noreferrer">خروجی CSV ${icon('download',15)}</a>`;
+ const headHtml=head(titleOf(resource),`مشاهده و مدیریت اطلاعات ${titleOf(resource)} در سازمان شما`,csvLink+btn);
  const cols=[...meta.cols];const rows=result.items.map(item=>{
   const values=cols.map(k=>`<td>${val(k,item[k])}</td>`).join('');
   const actions=actionBtns(resource,item);
@@ -433,6 +437,69 @@ async function openLedgerJournal(){
  },{save:'ثبت سند'});
 }
 
+async function renderIntegrations(){
+ const data=await api('integrations');state.data.integrations=data.items;
+ const allowed=!state.me.public_demo&&['owner','admin'].includes(state.me.role);
+ $('#page-content').innerHTML=`${head('اتصالات و زیرساخت','بخش آماده‌سازی سرویس‌هایی که بعداً تهیه می‌کنید')}
+ <div class="notice" style="margin-bottom:20px">این سرویس‌ها هنوز فعال نیستند و هیچ پیامک، پرداخت بانکی، فایل یا سفارش واقعی ارسال نمی‌شود. کلیدهای محرمانه فقط به‌صورت متغیر محیطی روی سرور ذخیره خواهند شد.</div>
+ <div class="metric-grid">${data.items.map(x=>`<div class="panel panel-padded">
+ <div class="between"><div><div class="panel-title">${esc(x.label)}</div><div class="panel-sub">سرویس: ${esc(x.provider||'انتخاب نشده')}</div></div><span class="pill">منتظر اتصال</span></div>
+ <p class="hint">برای فعال‌سازی نهایی به سرویس و اطلاعات اتصال نیاز است. رمز یا API Key در فرم عمومی دریافت نمی‌شود.</p>
+ <div class="between"><small>متغیر موردنیاز: <code dir="ltr">${esc(x.required_env)}</code></small>
+ ${allowed?`<button class="btn btn-small btn-outline" data-configure-integration="${esc(x.kind)}">تنظیمات آماده‌سازی ${icon('settings',14)}</button>`:''}</div></div>`).join('')}</div>`;
+}
+function openConfigureIntegration(kind){
+ const it=(state.data.integrations||[]).find(x=>x.kind===kind);if(!it)return;
+ const html=`<div class="notice">پیکربندی غیرمحرمانه ثبت می‌شود. اتصال واقعی فقط پس از تهیه سرویس، تعریف رمز در سرور و تست آداپتور فعال خواهد شد.</div>
+ <div class="form-grid" style="margin-top:16px"><div class="field full"><label>ارائه‌دهنده</label>
+ ${selectField('provider',it.providers.map(x=>({id:x,label:x})),it.provider)}</div>
+ ${it.fields.map(k=>`<div class="field full"><label>${esc(k)}</label><input class="input" type="text" name="${esc(k)}" maxlength="300" value="${esc(it.settings[k]||'')}" dir="ltr"></div>`).join('')}</div>`;
+ showModal('تنظیمات '+it.label,html,async form=>{
+  const fd=new FormData(form),settings={};
+  for(const k of it.fields)settings[k]=fd.get(k)||'';
+  await api('integrations/'+encodeURIComponent(kind),{method:'PUT',body:{provider:fd.get('provider'),settings}});
+  closeModal();notify('تنظیمات ذخیره شد؛ سرویس تا زمان اتصال واقعی غیرفعال است');renderIntegrations();
+ },{save:'ذخیره مشخصات'});
+}
+async function renderExpiryAlerts(){
+ const days=Number($('#expiry-days')?.value||60);
+ const d=await api('stock/expiry-alerts?days='+days+'&page='+state.page+'&limit=40');
+ $('#page-content').innerHTML=`${head('هشدار تاریخ انقضا','مشاهده بچ‌هایی که تاریخ مصرفشان گذشته یا نزدیک است')}
+ <div class="panel panel-padded" style="margin-bottom:16px"><div class="row wrap between">
+ <div class="field" style="width:210px"><label>بازه هشدار</label>
+ <select class="input" id="expiry-days">${[0,30,60,90,180,365,730].map(v=>`<option value="${v}" ${v===days?'selected':''}>${v===0?'منقضی‌شده':fa(v)+' روز آینده'}</option>`).join('')}</select></div>
+ <button class="btn btn-outline" id="expiry-filter">اعمال فیلتر ${icon('check',16)}</button></div></div>
+ <div class="panel"><div class="table-wrap"><table class="table"><thead><tr><th>کالا</th><th>بچ</th><th>انبار</th><th>موجودی</th><th>تاریخ انقضا</th><th>وضعیت</th></tr></thead>
+ <tbody>${d.items.map(x=>`<tr><td>${esc(x.sku)}</td><td>${esc(x.lot)}</td><td>${esc(x.warehouse)}</td><td>${fa(x.quantity)}</td>
+ <td>${dateFa(x.expiry_date)}</td><td>${x.days_left<0?'<span class="pill bad">منقضی‌شده</span>':`<span class="pill">${fa(x.days_left)} روز مانده</span>`}</td></tr>`).join('')||'<tr><td colspan="6">بچ دارای هشدار پیدا نشد.</td></tr>'}</tbody></table></div>
+ <div class="pagination"><span>${fa(d.total)} هشدار</span><div class="row"><button class="btn btn-small btn-outline" id="expiry-prev" ${state.page<=1?'disabled':''}>قبلی</button>
+ <button class="btn btn-small btn-outline" id="expiry-next" ${state.page*40>=d.total?'disabled':''}>بعدی</button></div></div></div>`;
+}
+async function renderAnalytics(){
+ const now=new Date(), iso=d=>d.toISOString().slice(0,10);
+ const end=$('#ana-end')?.value||iso(now);
+ const start=$('#ana-start')?.value||iso(new Date(now.getTime()-89*86400000));
+ const data=await api('analytics?start='+encodeURIComponent(start)+'&end='+encodeURIComponent(end));
+ const vals=data.daily.slice(-35),max=Math.max(1,...vals.map(x=>x.sales));
+ $('#page-content').innerHTML=`${head('تحلیل پیشرفته فروش','نمودار و شاخص‌های محاسبه‌شده از سفارش‌ها و ردیف‌های فروش')}
+ <div class="panel panel-padded" style="margin-bottom:18px"><div class="row wrap between">
+ <div class="row wrap"><div class="field"><label>از تاریخ</label><input class="input" id="ana-start" type="date" value="${esc(start)}"></div>
+ <div class="field"><label>تا تاریخ</label><input class="input" id="ana-end" type="date" value="${esc(end)}"></div></div>
+ <button class="btn btn-outline" id="analytics-refresh">به‌روزرسانی ${icon('check',16)}</button></div></div>
+ <div class="metric-grid">
+ ${[['مبلغ فروش',data.sales],['مبالغ وصول‌شده',data.paid],['میانگین سفارش',data.average_order],['تعداد سفارش',data.orders]].map(([k,v],i)=>`<div class="panel metric-card"><div class="label">${k}</div>
+ <strong class="num">${i===3?fa(v):money(v)}</strong></div>`).join('')}</div>
+ <div class="panel panel-padded" style="margin-top:18px"><div class="panel-title">روند فروش</div>
+ ${vals.length?`<div class="bars">${vals.map(x=>`<div class="bar-item" title="${money(x.sales)}"><div class="bar" style="height:${Math.max(2,x.sales/max*90)}%"></div>
+ <span class="bar-label">${dateFa(x.date).slice(0,5)}</span></div>`).join('')}</div>`:'<div class="empty">در این بازه سفارشی وجود ندارد</div>'}</div>
+ <div class="dashboard-layout" style="margin-top:18px">
+ <div class="panel panel-padded"><div class="panel-title">محبوب‌ترین کالاها</div>
+ <div class="table-wrap"><table class="table"><thead><tr><th>SKU</th><th>تعداد</th><th>فروش</th><th>حاشیه ناخالص</th></tr></thead>
+ <tbody>${data.top_products.map(x=>`<tr><td>${esc(x.sku)}</td><td>${fa(x.quantity)}</td><td>${money(x.sales)}</td><td>${money(x.gross_margin)}</td></tr>`).join('')}</tbody></table></div></div>
+ <div class="panel panel-padded"><div class="panel-title">کانال‌های فروش</div>
+ ${data.channels.map(x=>`<div class="recent-item between"><div><strong>${esc(x.channel)}</strong><div class="hint">${fa(x.orders)} سفارش</div></div><strong>${money(x.sales)}</strong></div>`).join('')||'بدون داده'}</div></div>`;
+}
+
 async function renderReports(){
  const report=await api('reports?type='+state.report);
  state.data.reportRows=report.rows;
@@ -492,6 +559,11 @@ root.addEventListener('click',async e=>{
   if(state.view==='purchases'||state.view==='sales')return openDocument(state.view);
   return openGeneric(state.view);
  }
+ if(btn.id==='analytics-refresh')return renderAnalytics();
+ if(btn.id==='expiry-filter')return renderExpiryAlerts();
+ if(btn.id==='expiry-prev'){state.page=Math.max(1,state.page-1);return renderExpiryAlerts()}
+ if(btn.id==='expiry-next'){state.page++;return renderExpiryAlerts()}
+ if(btn.hasAttribute('data-configure-integration'))return openConfigureIntegration(btn.dataset.configureIntegration);
  if(btn.id==='ledger-new-account')return openLedgerAccount();
  if(btn.id==='ledger-setup'){await api('ledger/bootstrap',{method:'POST',body:{}});notify('حساب‌ها ایجاد شدند');return renderLedger()}
  if(btn.id==='ledger-new-journal')return openLedgerJournal();
@@ -588,7 +660,7 @@ modals.addEventListener('submit',async e=>{
 });
 window.addEventListener('keydown',e=>{if(e.key==='Escape'&&modals.innerHTML)closeModal()});
 async function boot(){
- try{state.me=await api('auth/me');await maybeAcceptInvite();renderShell();const hash=location.hash.slice(1);state.view=(hash==='dashboard'||META[hash]||['reports','settings','team','cycle-count','invoices','ledger-accounts','ledger-journals','ledger-balance','ledger-profit'].includes(hash))?hash:'dashboard';setView(state.view)}
+ try{state.me=await api('auth/me');await maybeAcceptInvite();renderShell();const hash=location.hash.slice(1);state.view=(hash==='dashboard'||META[hash]||['reports','settings','team','cycle-count','invoices','ledger-accounts','ledger-journals','ledger-balance','ledger-profit','analytics','expiry-alerts','integrations'].includes(hash))?hash:'dashboard';setView(state.view)}
  catch{renderAuth()}
 }
 boot();
