@@ -62,7 +62,14 @@ def db_session():
     finally: db.close()
 
 def principal(req:Request,db:Session=Depends(db_session)):
-    return context(req,db)
+    ctx=context(req,db)
+    # A signed user session or the isolated read-only demo identity must be
+    # validated BEFORE setting the transaction-local PostgreSQL tenant scope.
+    # SET LOCAL avoids leaking the tenant across pooled connections.
+    if db.bind.dialect.name=='postgresql':
+        db.execute(text("SELECT set_config('erp.tenant_id', :tenant_id, true)"),
+                   {'tenant_id':ctx['tenant']})
+    return ctx
 
 def tenant_object(db,model,tenant_id,object_id,lock=False):
     q=db.query(model).filter_by(id=object_id,tenant_id=tenant_id)
@@ -113,6 +120,9 @@ def register(body:dict=Body(...),db:Session=Depends(db_session)):
         user=User(name=name,email=email,password_hash=make_password(password))
         tenant=Tenant(name=company)
         db.add_all([user,tenant]);db.flush()
+        if db.bind.dialect.name=='postgresql':
+            db.execute(text("SELECT set_config('erp.tenant_id', :tenant_id, true)"),
+                       {'tenant_id':tenant.id})
         db.add(Member(tenant_id=tenant.id,user_id=user.id,role='owner'))
         db.add(Warehouse(tenant_id=tenant.id,name='انبار اصلی',code='MAIN'))
         db.add(CashAccount(tenant_id=tenant.id,name='صندوق اصلی',type='cash'))
