@@ -416,10 +416,14 @@ def sale_action(sale_id:str,action:str,db:Session=Depends(db_session),ctx:dict=D
 def record_payment(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
     authorized(ctx,SALES|FINANCE)
     tid=ctx['tenant'];key=require_string(body.get('idempotency_key'),'شناسه یکتا',120)
-    existing=db.query(Payment).filter_by(tenant_id=tid,idempotency_key=key).first()
-    if existing:return {'duplicate':True,'payment':as_dict(existing)}
     v=positive(body.get('amount'),'مبلغ')
     sale_id=body.get('sale_id');purchase_id=body.get('purchase_id')
+    existing=db.query(Payment).filter_by(tenant_id=tid,idempotency_key=key).first()
+    if existing:
+        if (existing.amount != v or existing.order_id != sale_id or
+                existing.purchase_id != purchase_id or existing.method != body.get('method','cash')):
+            raise HTTPException(409,'شناسه یکتا قبلاً برای پرداخت متفاوتی استفاده شده است')
+        return {'duplicate':True,'payment':as_dict(existing)}
     if bool(sale_id)==bool(purchase_id):raise HTTPException(422,'فقط یک سند فروش یا خرید تعیین کنید')
     if purchase_id:authorized(ctx,FINANCE)
     doc=tenant_object(db,SalesOrder if sale_id else PurchaseOrder,tid,sale_id or purchase_id,lock=True)
@@ -523,6 +527,14 @@ def read_notification(notification_id:str,db:Session=Depends(db_session),ctx:dic
 
 @app.get('/api/health')
 def health():return {'ok':True,'service':'store-erp'}
+
+@app.get('/api/ready')
+def ready(db:Session=Depends(db_session)):
+    try:
+        db.execute(text('SELECT 1'))
+    except Exception:
+        raise HTTPException(503,'دیتابیس در دسترس نیست')
+    return {'ok':True,'database':'connected'}
 
 @app.get('/api/settings')
 def settings(db:Session=Depends(db_session),ctx:dict=Depends(principal)):
