@@ -279,7 +279,7 @@ READABLE={
  'lot-movements':(LotMovement,ALL,['reason']), 'transfers':(Transfer,ALL,['status']),
  'purchases':(PurchaseOrder,ALL,['number','status']),
  'purchase-lines':(PurchaseLine,ALL,[]),'sales':(SalesOrder,ALL,['number','status']),
- 'sales-lines':(SalesLine,ALL,[]),'payments':(Payment,FINANCE|SALES,['method']),
+ 'sales-lines':(SalesLine,ALL,[]),'fulfillments':(Fulfillment,ALL,['number','status']), 'payments':(Payment,FINANCE|SALES,['method']),
  'returns':(Return,ALL,['direction']), 'account-entries':(AccountEntry,FINANCE,[]),
  'notifications':(Notification,ALL,['title']), 'audit':(Audit,{'owner','admin'},['action','entity'])
 }
@@ -323,7 +323,7 @@ def create_resource(resource:str,body:dict=Body(...),db:Session=Depends(db_sessi
     vals=checked_fields(db,ctx,model,fields,body)
     if resource=='shipments':
         linked=tenant_object(db,SalesOrder,ctx['tenant'],vals.get('order_id'))
-        if linked.status!='fulfilled':raise HTTPException(409,'ارسال فقط برای سفارش تحویل‌شده قابل ثبت است')
+        if linked.status not in ('fulfilled','partial'):raise HTTPException(409,'ارسال فقط برای سفارش دارای تحویل قابل ثبت است')
     try:
         obj=model(tenant_id=ctx['tenant'],**vals)
         db.add(obj);db.flush()
@@ -737,36 +737,137 @@ def create_sale(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depe
         db.add(SalesLine(tenant_id=tid,order_id=obj.id,variant_id=variant.id,quantity=qty,price=price,cost_snapshot=variant.purchase_cost))
     audit(db,ctx,'create','sales',obj.id);db.commit();return as_dict(obj)
 
+def _fulfill_sale(db:Session,ctx,order:SalesOrder,desired:dict):
+    if order.status not in ('confirmed','partial'):
+        raise HTTPException(409,'سفارش برای ارسال آماده نیست')
+    lines=db.query(SalesLine).filter_by(tenant_id=ctx['tenant'],
+         order_id=order.id).order_by(SalesLine.id).with_for_update().all()
+    valid={x.id:x for x in lines}
+    if not desired or set(desired)-set(valid):
+        raise HTTPException(422,'ردیف‌های ارسال نامعتبر هستند')
+    for lid,qty in desired.items():
+        positive(qty)
+        line=valid[lid]
+        if qty>line.quantity-line.fulfilled:
+            raise HTTPException(409,'ارسال بیشتر از تعداد باقی‌مانده است')
+    gross=sum(l.quantity*l.price for l in lines)
+    already=sum(l.fulfilled*l.price for l in lines)
+    dispatched=sum(valid[lid].price*qty for lid,qty in desired.items())
+    revenue=(order.total*(already+dispatched)//gross-order.total*already//gross) if gross else 0
+    cogs=sum(valid[lid].cost_snapshot*qty for lid,qty in desired.items())
+    if revenue<0:raise HTTPException(409,'ارزش ارسالی نامعتبر است')
+    snap=[]
+    for lid,qty in sorted(desired.items()):
+        ln=valid[lid]
+        _stock(db,ctx,order.warehouse_id,ln.variant_id,-qty,'sale_fulfill',
+               order.id,release_reserved=qty)
+        ln.fulfilled+=qty
+        snap.append({'line_id':lid,'variant_id':ln.variant_id,'quantity':qty,
+                     'unit_price':ln.price,'cost_snapshot':ln.cost_snapshot})
+    doc=Fulfillment(tenant_id=ctx['tenant'],order_id=order.id,
+                    warehouse_id=order.warehouse_id,number=_number('FUL'),
+                    status='shipped',items=snap,revenue=revenue,cost=cogs)
+    db.add(doc);db.flush()
+    postings=[]
+    if revenue:postings.extend([('1200',int(revenue),0),('4000',0,int(revenue))])
+    if cogs:postings.extend([('5000',int(cogs),0),('1300',0,int(cogs))])
+    if postings:
+        _post_journal(db,ctx,'fulfillment:'+doc.id,
+                      'تحویل کالا از سفارش '+order.number,postings)
+    order.status='fulfilled' if all(l.fulfilled==l.quantity for l in lines) else 'partial'
+    audit(db,ctx,'fulfill','sales',order.id,{'fulfillment_id':doc.id,'items':snap})
+    notification(db,ctx['tenant'],'بسته ارسالی ثبت شد',
+                 f'محموله {doc.number} از سفارش {order.number} خارج شد.','shipping')
+    return doc
+
+@app.post('/api/sales/{sale_id}/fulfill-partial')
+def fulfill_partial(sale_id:str,body:dict=Body(...),
+                    db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,SALES|WAREHOUSE)
+    key=require_string(body.get('idempotency_key'),'شناسه درخواست',150)
+    tid=ctx['tenant']
+    prior=db.query(EventKey).filter_by(tenant_id=tid,kind='partial_fulfill',key=key).first()
+    if prior:
+        doc=tenant_object(db,Fulfillment,tid,prior.reference_id)
+        return {'duplicate':True,'fulfillment':as_dict(doc)}
+    order=tenant_object(db,SalesOrder,tid,sale_id,lock=True)
+    payload=body.get('items')
+    if not isinstance(payload,list) or not 1<=len(payload)<=100:
+        raise HTTPException(422,'حداقل یک قلم برای ارسال لازم است')
+    desired={}
+    for item in payload:
+        if not isinstance(item,dict):
+            raise HTTPException(422,'ردیف نامعتبر')
+        lid=item.get('line_id')
+        if not isinstance(lid,str) or lid in desired:
+            raise HTTPException(422,'ردیف تکراری یا نامعتبر است')
+        desired[lid]=positive(item.get('quantity'))
+    doc=_fulfill_sale(db,ctx,order,desired)
+    db.add(EventKey(tenant_id=tid,kind='partial_fulfill',key=key,reference_id=doc.id))
+    try:db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,'درخواست ارسال تکراری است')
+    return {'duplicate':False,'fulfillment':as_dict(doc),'order':as_dict(order)}
+
 @app.post('/api/sales/{sale_id}/{action}')
 def sale_action(sale_id:str,action:str,db:Session=Depends(db_session),ctx:dict=Depends(principal)):
     authorized(ctx,SALES|WAREHOUSE if action=='fulfill' else SALES)
     order=tenant_object(db,SalesOrder,ctx['tenant'],sale_id,lock=True)
-    lines=db.query(SalesLine).filter_by(tenant_id=ctx['tenant'],order_id=order.id).all()
+    lines=db.query(SalesLine).filter_by(tenant_id=ctx['tenant'],
+                      order_id=order.id).order_by(SalesLine.id).with_for_update().all()
     counts={}
     for l in lines:counts[l.variant_id]=counts.get(l.variant_id,0)+l.quantity
     if action=='confirm' and order.status=='draft':
-        for vid,qty in sorted(counts.items()):_stock(db,ctx,order.warehouse_id,vid,0,'reserve',order.id,reserve=qty)
+        for vid,qty in sorted(counts.items()):
+            _stock(db,ctx,order.warehouse_id,vid,0,'reserve',order.id,reserve=qty)
         order.status='confirmed'
-    elif action=='fulfill' and order.status=='confirmed':
-        for vid,qty in sorted(counts.items()):_stock(db,ctx,order.warehouse_id,vid,-qty,'sale_fulfill',order.id,release_reserved=qty)
-        order.status='fulfilled'
-        cogs=sum(int(l.quantity*l.cost_snapshot) for l in lines)
-        postings=[]
-        if order.total:
-            postings.extend([('1200',int(order.total),0),('4000',0,int(order.total))])
-        if cogs:
-            postings.extend([('5000',cogs,0),('1300',0,cogs)])
-        if postings:
-            _post_journal(db,ctx,'sale-fulfill:'+order.id,'تحویل فروش '+order.number,postings)
-        notification(db,ctx['tenant'],'سفارش آماده شد',f'سفارش {order.number} از انبار خارج شد.','sale')
+    elif action=='fulfill' and order.status in ('confirmed','partial'):
+        desired={ln.id:ln.quantity-ln.fulfilled for ln in lines
+                 if ln.quantity>ln.fulfilled}
+        _fulfill_sale(db,ctx,order,desired)
     elif action=='cancel' and order.status in ('draft','confirmed'):
-        if order.paid>0:raise HTTPException(409,'سفارش دارای پرداخت است؛ ابتدا استرداد را ثبت کنید')
+        if order.paid>0:
+            raise HTTPException(409,'سفارش دارای پرداخت است؛ ابتدا استرداد را ثبت کنید')
         if order.status=='confirmed':
-            for vid,qty in sorted(counts.items()):_stock(db,ctx,order.warehouse_id,vid,0,'unreserve',order.id,release_reserved=qty)
+            for vid,qty in sorted(counts.items()):
+                _stock(db,ctx,order.warehouse_id,vid,0,'unreserve',order.id,
+                       release_reserved=qty)
         order.status='cancelled'
-    else:raise HTTPException(409,'انتقال وضعیت غیرمجاز است')
+    else:
+        raise HTTPException(409,'انتقال وضعیت غیرمجاز است')
     audit(db,ctx,action,'sales',order.id)
-    db.commit();return as_dict(order)
+    db.commit()
+    return as_dict(order)
+
+@app.get('/api/fulfillments')
+def list_fulfillments(page:int=Query(1,ge=1),limit:int=Query(30,ge=1,le=100),
+                      db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,ALL)
+    q=db.query(Fulfillment).filter_by(tenant_id=ctx['tenant'])
+    total=q.count()
+    rows=q.order_by(Fulfillment.created_at.desc()).offset((page-1)*limit).limit(limit).all()
+    return {'items':[as_dict(x) for x in rows],'total':total,'page':page,'limit':limit}
+
+@app.patch('/api/fulfillments/{fulfillment_id}')
+def update_fulfillment(fulfillment_id:str,body:dict=Body(...),
+                       db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,SALES|WAREHOUSE)
+    if not isinstance(body,dict) or set(body)-{'carrier','tracking_number','status'}:
+        raise HTTPException(422,'فیلد نامعتبر')
+    doc=tenant_object(db,Fulfillment,ctx['tenant'],fulfillment_id,lock=True)
+    if doc.status=='delivered':
+        raise HTTPException(409,'محموله تحویل‌شده قابل ویرایش نیست')
+    if body.get('status',doc.status) not in ('shipped','delivered'):
+        raise HTTPException(422,'وضعیت مجاز نیست')
+    for key,value in body.items():
+        if key in ('carrier','tracking_number'):
+            if value is not None and (not isinstance(value,str) or len(value)>120):
+                raise HTTPException(422,'مقدار نامعتبر')
+        setattr(doc,key,value)
+    audit(db,ctx,'update','fulfillments',doc.id,body)
+    db.commit()
+    return as_dict(doc)
 
 @app.post('/api/invoices')
 def issue_invoice(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
@@ -916,14 +1017,14 @@ def record_return(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=De
         if previous:return {'duplicate':True,'return_id':previous.reference_id}
     id_=body.get('order_id')
     doc=tenant_object(db,SalesOrder if direction=='sale' else PurchaseOrder,tid,id_,lock=True)
-    if direction=='sale' and doc.status!='fulfilled':raise HTTPException(409,'فقط فروش تحویل‌شده مرجوع می‌شود')
+    if direction=='sale' and doc.status not in ('fulfilled','partial'):raise HTTPException(409,'فقط فروش تحویل‌شده مرجوع می‌شود')
     if direction=='purchase' and doc.status not in ('received','partial'):raise HTTPException(409,'این خرید هنوز دریافت نشده است')
     vid=body.get('variant_id');qty=positive(body.get('quantity'))
     line_model=SalesLine if direction=='sale' else PurchaseLine
     line=db.query(line_model).filter_by(tenant_id=tid,order_id=doc.id,variant_id=vid).with_for_update().first()
     if not line:raise HTTPException(422,'کالا در سند وجود ندارد')
     if direction=='sale':
-        if qty>line.quantity-line.returned:raise HTTPException(409,'تعداد مرجوعی از فروش بیشتر است')
+        if qty>line.fulfilled-line.returned:raise HTTPException(409,'تعداد مرجوعی از کالای تحویل‌شده بیشتر است')
         line.returned+=qty
     else:
         prior=db.query(func.coalesce(func.sum(Return.quantity),0)).filter_by(tenant_id=tid,purchase_id=doc.id,variant_id=vid,direction='purchase').scalar()
