@@ -138,6 +138,8 @@ function actionBtns(resource,item){
    if(item.status==='fulfilled')out+=`<button class="btn btn-small btn-light" data-document-action="sale-return:${item.id}">مرجوعی ${icon('returns',14)}</button>`;
    if(item.status!=='cancelled'&&item.paid<item.total)out+=`<button class="btn btn-small btn-light" data-document-action="pay-sale:${item.id}">پرداخت ${icon('coins',14)}</button>`;
  }
+ if(resource==='returns'&&roleCan('cash-accounts'))
+   out+=`<button class="btn btn-small btn-light" data-return-settle="${esc(item.id)}">تسویه وجه ${icon('coins',14)}</button>`;
  if(resource==='notifications'&&!item.read)out+=`<button class="btn btn-small btn-light" data-mark-read="${item.id}">خواندم ${icon('check',14)}</button>`;
  return out;
 }
@@ -281,6 +283,24 @@ async function openPayment(kind,id){
   await api('payments',{method:'POST',body});closeModal();notify('پرداخت ثبت شد و اعلان آن ایجاد شد');loadView();
  },{save:'ثبت پرداخت'});
 }
+async function openReturnSettlement(id){
+ const [balance,accounts]=await Promise.all([api('returns/'+encodeURIComponent(id)+'/settlement'),lookup('cash-accounts')]);
+ if(balance.remaining<=0)return notify('این مرجوعی مانده قابل تسویه ندارد',true);
+ if(!accounts.length)return notify('ابتدا یک حساب نقدی یا بانکی ثبت کنید',true);
+ const content=`<div class="notice">سند ${esc(balance.document_number)} — ${balance.direction==='sale'?'بازپرداخت به مشتری':'دریافت از تأمین‌کننده'}
+ <strong>${money(balance.remaining)}</strong> مانده دارد.</div>
+ <div class="form-grid" style="margin-top:16px"><div class="field"><label>مبلغ تسویه (تومان)</label>
+ <input class="input" name="amount" type="number" required min="1" step="1" max="${balance.remaining}" value="${balance.remaining}"></div>
+ <div class="field"><label>حساب ثبت وجه</label>${selectField('account_id',accounts.map(x=>({id:x.id,label:x.name})))}</div></div>
+ <p class="hint">این عملیات صرفاً تسویه دستی را در حساب‌های ERP ثبت می‌کند؛ به درگاه بانکی متصل نیست.</p>`;
+ showModal('تسویه مرجوعی',content,async form=>{
+  const f=new FormData(form);
+  await api('returns/'+encodeURIComponent(id)+'/settle',{method:'POST',
+    body:{amount:Number(f.get('amount')),account_id:f.get('account_id'),idempotency_key:uid()}});
+  closeModal();notify('تسویه مرجوعی ثبت شد');loadView();
+ },{save:'ثبت تسویه'});
+}
+
 async function openReturn(kind,id){
  const purchase=kind==='purchase';
  const data=await api(`documents/${purchase?'purchases':'sales'}/${id}/lines`);
@@ -371,6 +391,7 @@ root.addEventListener('click',async e=>{
   if(!confirm('این عملیات موجودی یا وضعیت سند را تغییر می‌دهد. ادامه می‌دهید؟'))return;
   await api(`${resource}/${id}/${action}`,{method:'POST',body:resource==='purchases'?{idempotency_key:uid()}:{} });notify('وضعیت ثبت شد');return loadView();
  }
+ if(btn.hasAttribute('data-return-settle'))return openReturnSettlement(btn.dataset.returnSettle);
  if(btn.hasAttribute('data-document-action')){
   const [kind,id]=btn.dataset.documentAction.split(':');
   if(kind.startsWith('pay-'))return openPayment(kind.slice(4),id);
