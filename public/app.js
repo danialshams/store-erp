@@ -12,13 +12,13 @@ function icon(name,size=18){return `<span class="icon"><svg width="${size}" heig
 const NAV=[
  ['نمای کلی',[['dashboard','داشبورد','grid'],['notifications','اعلان‌ها','bell']]],
  ['کالا و موجودی',[['products','کالاها','box'],['variants','تنوع و قیمت','layers'],['categories','دسته‌بندی‌ها','tag'],['warehouses','انبارها','warehouse'],['stocks','موجودی کالا','box'],['batches','بچ و تاریخ انقضا','layers'],['serials','شماره سریال‌ها','tag'],['lot-movements','گردش بچ‌ها','layers'],['expiry-alerts','هشدار انقضا','bell'],['movements','گردش انبار','swap'],['cycle-count','انبارگردانی','check'],['transfers','انتقال بین انبارها','swap']]],
- ['خرید و فروش',[['suppliers','تأمین‌کنندگان','truck'],['purchases','سفارش‌های خرید','cart'],['customers','مشتریان','users'],['sales','فروش و سفارش‌ها','cart'],['fulfillments','ارسال‌های جزئی','truck'],['returns','مرجوعی‌ها','returns'],['shipments','ارسال و رهگیری','truck']]],
+ ['خرید و فروش',[['suppliers','تأمین‌کنندگان','truck'],['purchases','سفارش‌های خرید','cart'],['customers','مشتریان','users'],['credit-exposure','اعتبار مشتریان','card'],['sales','فروش و سفارش‌ها','cart'],['fulfillments','ارسال‌های جزئی','truck'],['returns','مرجوعی‌ها','returns'],['shipments','ارسال و رهگیری','truck']]],
  ['امور مالی',[['invoices','فاکتورهای فروش','file'],['payments','پرداخت‌ها','coins'],['cash-accounts','حساب‌ها','card'],['ledger-accounts','کدینگ حسابداری','layers'],['ledger-journals','اسناد حسابداری','file'],['ledger-balance','تراز آزمایشی','chart'],['ledger-profit','سود و زیان','chart'],['account-entries','گردش حساب‌ها','file'],['price-lists','لیست‌های قیمت','tag'],['price-items','قیمت‌های اختصاصی','tag'],['tax-rates','مالیات‌ها','file'],['reports','گزارش‌ها','chart'],['analytics','تحلیل پیشرفته','chart']]],
  ['مدیریت',[['team','کاربران و دسترسی','users'],['settings','تنظیمات کسب‌وکار','settings'],['security','امنیت و نشست‌ها','settings'],['integrations','اتصالات آینده','settings'],['audit','تاریخچه عملیات','clock']]]
 ];
-const LABELS={id:'شناسه',name:'نام',sku:'کد کالا',code:'کد انبار',barcode:'بارکد',unit:'واحد',description:'توضیحات',category_id:'دسته‌بندی',product_id:'کالا',warehouse_id:'انبار',variant_id:'تنوع کالا',supplier_id:'تأمین‌کننده',customer_id:'مشتری',group_name:'گروه',price:'قیمت',purchase_cost:'بهای خرید',retail_price:'قیمت فروش',wholesale_price:'قیمت عمده',low_stock:'حد هشدار',quantity:'تعداد',reserved:'رزروشده',delta:'تغییر',number:'شماره',status:'وضعیت',total:'مبلغ کل',paid:'پرداخت‌شده',discount:'تخفیف',channel:'کانال فروش',phone:'تلفن',email:'ایمیل',address:'نشانی',notes:'توضیحات',active:'فعال',archived:'آرشیو',read:'خوانده شده',amount:'مبلغ',method:'روش',reference_id:'مرجع',created_at:'تاریخ',carrier:'شرکت حمل',tracking_number:'کد رهگیری',role:'نقش',opening_balance:'موجودی اولیه',percentage:'درصد',title:'عنوان',body:'متن',category:'نوع',reason:'علت',source_id:'انبار مبدأ',destination_id:'انبار مقصد',direction:'جهت',restock:'بازگشت به موجودی',expiry_date:'تاریخ انقضا',lot:'سری ساخت',order_id:'سفارش',purchase_id:'خرید',list_id:'لیست قیمت',actor_id:'کاربر',entity:'موجودیت',action:'عملیات',credit_limit:'سقف اعتبار',track_batch:'ردیابی بچ',track_serial:'ردیابی سریال',image_url:'آدرس تصویر'};
+const LABELS={tax_amount:'مالیات فروش',tax_rate_id:'نرخ مالیات',payment_terms:'شرایط پرداخت',id:'شناسه',name:'نام',sku:'کد کالا',code:'کد انبار',barcode:'بارکد',unit:'واحد',description:'توضیحات',category_id:'دسته‌بندی',product_id:'کالا',warehouse_id:'انبار',variant_id:'تنوع کالا',supplier_id:'تأمین‌کننده',customer_id:'مشتری',group_name:'گروه',price:'قیمت',purchase_cost:'بهای خرید',retail_price:'قیمت فروش',wholesale_price:'قیمت عمده',low_stock:'حد هشدار',quantity:'تعداد',reserved:'رزروشده',delta:'تغییر',number:'شماره',status:'وضعیت',total:'مبلغ کل',paid:'پرداخت‌شده',discount:'تخفیف',channel:'کانال فروش',phone:'تلفن',email:'ایمیل',address:'نشانی',notes:'توضیحات',active:'فعال',archived:'آرشیو',read:'خوانده شده',amount:'مبلغ',method:'روش',reference_id:'مرجع',created_at:'تاریخ',carrier:'شرکت حمل',tracking_number:'کد رهگیری',role:'نقش',opening_balance:'موجودی اولیه',percentage:'درصد',title:'عنوان',body:'متن',category:'نوع',reason:'علت',source_id:'انبار مبدأ',destination_id:'انبار مقصد',direction:'جهت',restock:'بازگشت به موجودی',expiry_date:'تاریخ انقضا',lot:'سری ساخت',order_id:'سفارش',purchase_id:'خرید',list_id:'لیست قیمت',actor_id:'کاربر',entity:'موجودیت',action:'عملیات',credit_limit:'سقف اعتبار',track_batch:'ردیابی بچ',track_serial:'ردیابی سریال',image_url:'آدرس تصویر'};
 const NUMERIC=new Set(['purchase_cost','retail_price','wholesale_price','low_stock','credit_limit','price','opening_balance','percentage','quantity','delta','discount']);
-const MONETARY=new Set(['purchase_cost','retail_price','wholesale_price','credit_limit','price','opening_balance','total','paid','discount','amount']);
+const MONETARY=new Set(['tax_amount','purchase_cost','retail_price','wholesale_price','credit_limit','price','opening_balance','total','paid','discount','amount']);
 const BOOLEAN=new Set(['active','track_batch','track_serial','restock']);
 const REF={category_id:'categories',product_id:'products',warehouse_id:'warehouses',variant_id:'variants',supplier_id:'suppliers',customer_id:'customers',order_id:'sales',list_id:'price-lists'};
 const META={
@@ -35,7 +35,7 @@ const META={
  suppliers:{cols:['name','phone','email','created_at'],fields:['name','phone','email','address','notes']},
  purchases:{cols:['number','supplier_id','status','total','paid','created_at'],special:'purchase'},
  customers:{cols:['name','phone','group_name','credit_limit','created_at'],fields:['name','phone','email','address','group_name','credit_limit']},
- sales:{cols:['number','customer_id','status','total','paid','created_at'],special:'sale'},
+ sales:{cols:['number','customer_id','status','payment_terms','tax_amount','total','paid','created_at'],special:'sale'},
  returns:{cols:['direction','variant_id','quantity','amount','created_at'],readonly:true},
  shipments:{cols:['order_id','carrier','tracking_number','status'],fields:['order_id','carrier','tracking_number','status','address']},
  payments:{cols:['order_id','purchase_id','amount','method','created_at'],readonly:true},
@@ -109,6 +109,7 @@ async function loadView(){
    if(state.view==='dashboard')await renderDashboard();
    else if(state.view==='invoices')await renderInvoices();
    else if(state.view==='fulfillments')await renderFulfillments();
+   else if(state.view==='credit-exposure')await renderCreditExposure();
    else if(state.view==='reports')await renderReports();
    else if(state.view==='analytics')await renderAnalytics();
    else if(state.view==='expiry-alerts')await renderExpiryAlerts();
@@ -307,12 +308,12 @@ async function openAdjustment(){
 }
 async function openDocument(kind){
  const purchase=kind==='purchases';
- const [warehouses,variants,contacts]=await Promise.all([lookup('warehouses'),lookup('variants'),lookup(purchase?'suppliers':'customers')]);
+ const [warehouses,variants,contacts,taxes]=await Promise.all([lookup('warehouses'),lookup('variants'),lookup(purchase?'suppliers':'customers'),purchase?Promise.resolve([]):lookup('tax-rates')]);
  if(!warehouses.length||!variants.length||(purchase&&!contacts.length)){notify('ابتدا کالا، انبار و اطلاعات مرتبط را ثبت کنید',true);return}
  const contactsOptions=contacts.map(x=>({id:x.id,label:x.name}));
  const opts=variants.filter(x=>x.active).map(x=>({id:x.id,label:`${x.sku} - ${x.name}`,cost:x.purchase_cost,price:x.retail_price}));
  const line=()=>`<div class="items-editor item-line"><select class="input item-variant" required>${opts.map(x=>`<option value="${esc(x.id)}">${esc(x.label)}</option>`).join('')}</select><input class="input item-qty" type="number" min="1" value="1" required><input class="input item-price money" type="number" min="0" placeholder="قیمت پیش‌فرض"><button class="btn btn-light remove-item" type="button" title="حذف این قلم">${icon('x',14)}</button></div>`;
- const content=`<div class="form-grid"><div class="field"><label>انبار</label>${selectField('warehouse_id',warehouses.map(x=>({id:x.id,label:x.name})))}</div><div class="field"><label>${purchase?'تأمین‌کننده':'مشتری'}</label>${selectField(purchase?'supplier_id':'customer_id',contactsOptions,null,!purchase)}</div>${purchase?'':`<div class="field"><label>کانال فروش</label>${selectField('channel',[{id:'retail',label:'خرده‌فروشی'},{id:'wholesale',label:'عمده'},{id:'online',label:'آنلاین'},{id:'pos',label:'حضوری'}])}</div><div class="field"><label>تخفیف کل (تومان)</label><input name="discount" class="input" type="number" min="0" value="0"></div>`}</div><div class="modal-divider"></div><div class="between"><strong>اقلام سفارش</strong><button class="btn btn-small btn-light" type="button" id="new-line">افزودن قلم ${icon('plus',15)}</button></div><div class="line-header">کالا / تعداد / قیمت اختیاری (تومان)</div><div id="items-list">${line()}</div><p class="hint">اگر قیمت را خالی بگذارید، نرخ ثبت‌شده برای کالا استفاده می‌شود.</p>`;
+ const content=`<div class="form-grid"><div class="field"><label>انبار</label>${selectField('warehouse_id',warehouses.map(x=>({id:x.id,label:x.name})))}</div><div class="field"><label>${purchase?'تأمین‌کننده':'مشتری'}</label>${selectField(purchase?'supplier_id':'customer_id',contactsOptions,null,!purchase)}</div>${purchase?'':`<div class="field"><label>کانال فروش</label>${selectField('channel',[{id:'retail',label:'خرده‌فروشی'},{id:'wholesale',label:'عمده'},{id:'online',label:'آنلاین'},{id:'pos',label:'حضوری'}])}</div><div class="field"><label>تخفیف کل (تومان)</label><input name="discount" class="input" type="number" min="0" value="0"></div><div class="field"><label>مالیات فروش (اختیاری)</label>${selectField('tax_rate_id',taxes.map(t=>({id:t.id,label:t.name+' - '+fa(t.percentage)+' درصد'})),null,true)}</div><div class="field"><label>نوع تسویه</label>${selectField('payment_terms',[{id:'immediate',label:'عادی/پرداخت نقدی یا دستی'},{id:'credit',label:'فروش اعتباری با سقف مشتری'}])}</div>`}</div><div class="modal-divider"></div><div class="between"><strong>اقلام سفارش</strong><button class="btn btn-small btn-light" type="button" id="new-line">افزودن قلم ${icon('plus',15)}</button></div><div class="line-header">کالا / تعداد / قیمت اختیاری (تومان)</div><div id="items-list">${line()}</div><p class="hint">اگر قیمت را خالی بگذارید، نرخ ثبت‌شده برای کالا استفاده می‌شود.</p>`;
  showModal(purchase?'ایجاد سفارش خرید':'ثبت سفارش فروش',content,async form=>{
   const f=new FormData(form);
   const items=$$('.item-line',form).map(row=>{
@@ -321,7 +322,7 @@ async function openDocument(kind){
   });
   const body={warehouse_id:f.get('warehouse_id'),items};
   if(purchase)body.supplier_id=f.get('supplier_id');
-  else {body.customer_id=f.get('customer_id')||null;body.channel=f.get('channel');body.discount=Number(f.get('discount')||0)}
+  else {body.customer_id=f.get('customer_id')||null;body.channel=f.get('channel');body.discount=Number(f.get('discount')||0);body.tax_rate_id=f.get('tax_rate_id')||null;body.payment_terms=f.get('payment_terms')||'immediate'}
   await api(kind,{method:'POST',body});closeModal();notify('سفارش ثبت شد');loadView();
  },{wide:true,save:'ثبت سفارش'});
  const btn=$('#new-line');btn.addEventListener('click',()=>$('#items-list').insertAdjacentHTML('beforeend',line()));
@@ -426,6 +427,23 @@ async function openPartialFulfill(id){
       body:{items,idempotency_key:uid()}});
   closeModal();notify('محموله ثبت شد؛ موجودی و حسابداری به‌روزرسانی شدند');loadView();
  },{save:'ثبت ارسال',wide:true});
+}
+
+async function renderCreditExposure(){
+ const result=await api('credit-exposure?page='+state.page+'&limit=50');
+ const rows=result.items.map(x=>`<tr><td>${esc(x.name)}</td><td>${esc(x.group_name)}</td>
+ <td>${money(x.credit_limit)}</td><td>${money(x.outstanding)}</td>
+ <td>${money(x.available)}</td><td>${x.over_limit?'<span class="pill bad">فراتر از سقف</span>':'<span class="pill good">مجاز</span>'}</td></tr>`).join('');
+ $('#page-content').innerHTML=`${head('مدیریت اعتبار مشتریان',
+ 'سقف اعتبار قابل تنظیم در پرونده مشتری است؛ فروش اعتباری بیش از سقف رد می‌شود')}
+ <div class="panel"><div class="table-wrap"><table class="table"><thead><tr>
+ <th>مشتری</th><th>گروه</th><th>سقف اعتبار</th><th>مانده بدهی اعتباری</th><th>اعتبار آزاد</th><th>وضعیت</th>
+ </tr></thead><tbody>${rows||'<tr><td colspan="6">مشتری دارای سقف اعتبار یافت نشد.</td></tr>'}</tbody></table></div>
+ <div class="pagination"><span>${fa(result.total)} مشتری اعتباری</span><div class="row">
+ <button class="btn btn-small btn-outline" id="credit-prev" ${state.page<=1?'disabled':''}>قبلی</button>
+ <button class="btn btn-small btn-outline" id="credit-next" ${state.page*50>=result.total?'disabled':''}>بعدی</button>
+ </div></div></div>
+ <p class="hint">سقف اعتبار فقط برای سفارش با شرایط «فروش اعتباری» اعمال می‌شود. سفارش‌های عادی همچنان قابلیت ثبت پرداخت دستی دارند.</p>`;
 }
 
 async function renderInvoices(){
@@ -695,6 +713,8 @@ root.addEventListener('click',async e=>{
   if(state.view==='purchases'||state.view==='sales')return openDocument(state.view);
   return openGeneric(state.view);
  }
+ if(btn.id==='credit-prev'){state.page=Math.max(1,state.page-1);return renderCreditExposure()}
+ if(btn.id==='credit-next'){state.page++;return renderCreditExposure()}
  if(btn.id==='analytics-refresh')return renderAnalytics();
  if(btn.hasAttribute('data-revoke-session')){if(confirm('نشست انتخاب‌شده لغو شود؟')){await api('auth/sessions/'+btn.dataset.revokeSession+'/revoke',{method:'POST',body:{}});notify('نشست لغو شد');return renderSecurity()}}
  if(btn.id==='security-change-password')return openChangePassword();
@@ -804,7 +824,7 @@ modals.addEventListener('submit',async e=>{
 });
 window.addEventListener('keydown',e=>{if(e.key==='Escape'&&modals.innerHTML)closeModal()});
 async function boot(){
- try{state.me=await api('auth/me');await maybeAcceptInvite();renderShell();const hash=location.hash.slice(1);state.view=(hash==='dashboard'||META[hash]||['reports','settings','team','cycle-count','invoices','ledger-accounts','ledger-journals','ledger-balance','ledger-profit','analytics','expiry-alerts','integrations','security','fulfillments'].includes(hash))?hash:'dashboard';setView(state.view)}
+ try{state.me=await api('auth/me');await maybeAcceptInvite();renderShell();const hash=location.hash.slice(1);state.view=(hash==='dashboard'||META[hash]||['reports','settings','team','cycle-count','invoices','ledger-accounts','ledger-journals','ledger-balance','ledger-profit','analytics','expiry-alerts','integrations','security','fulfillments','credit-exposure'].includes(hash))?hash:'dashboard';setView(state.view)}
  catch{renderAuth()}
 }
 boot();
