@@ -104,6 +104,9 @@ jobs:
           test "$(psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -tAc "SELECT count(*) FROM sales_orders WHERE tenant_id='demo-erp-tenant-2026'")" -eq 460
           test "$(psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -tAc "SELECT count(*) FROM purchase_orders WHERE tenant_id='demo-erp-tenant-2026'")" -eq 270
 
+      - name: PostgreSQL multi-tenant RLS matrix (all tenant-scoped tables)
+        run: psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f tests/postgres_rls_matrix.sql
+
       - name: PostgreSQL backup/restore disaster recovery drill
         env:
           DATABASE_URL: postgresql+psycopg2://erp:ci-only-secret@localhost:5432/erp
