@@ -471,3 +471,46 @@ def test_serial_lifecycle_and_expired_fefo_rejection():
     new=client.post('/api/sales',json={'warehouse_id':wh['id'],
          'items':[{'variant_id':bad['id'],'quantity':1}]}).json()
     assert client.post('/api/sales/'+new['id']+'/confirm').status_code==409
+
+
+def test_revocable_auth_sessions_password_change_and_login_throttle():
+    from api.db import Session as DbSession
+    from api.models import LoginThrottle
+    client=TestClient(app)
+    person=create_user(client,'revocable-owner')
+    current=client.get('/api/auth/sessions')
+    assert current.status_code==200,current.text
+    assert len(current.json()['items'])==1
+    session_id=current.json()['items'][0]['id']
+    assert client.get('/api/auth/me').status_code==200
+    outsider=TestClient(app)
+    create_user(outsider,'revocable-outside')
+    assert outsider.post('/api/auth/sessions/'+session_id+'/revoke').status_code==404
+    revoked=client.post('/api/auth/sessions/'+session_id+'/revoke')
+    assert revoked.status_code==200,revoked.text
+    assert client.get('/api/auth/me').status_code==401
+    login=client.post('/api/auth/login',json={'email':'revocable-owner@example.com',
+             'password':'A-strong-test-password-999'})
+    assert login.status_code==200,login.text
+    assert client.get('/api/auth/me').status_code==200
+    changed=client.post('/api/auth/password/change',json={
+         'current_password':'A-strong-test-password-999',
+         'new_password':'New-Strong-Password-2026'})
+    assert changed.status_code==200,changed.text
+    assert client.get('/api/auth/me').status_code==401
+    assert client.post('/api/auth/login',json={
+         'email':'revocable-owner@example.com',
+         'password':'A-strong-test-password-999'}).status_code==401
+    assert client.post('/api/auth/login',json={
+         'email':'revocable-owner@example.com',
+         'password':'New-Strong-Password-2026'}).status_code==200
+    assert client.post('/api/auth/logout',json={}).status_code==200
+    assert client.get('/api/auth/me').status_code==401
+    wrong=TestClient(app)
+    for i in range(9):
+        reply=wrong.post('/api/auth/login',json={
+            'email':'no-such-user-throttle@example.com','password':'invalid-credentials'})
+        assert reply.status_code in (401,429)
+    assert wrong.post('/api/auth/login',json={
+            'email':'no-such-user-throttle@example.com',
+            'password':'invalid-credentials'}).status_code==429
