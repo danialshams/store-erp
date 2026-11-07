@@ -65,7 +65,7 @@ async function api(path,{method='GET',body}={}){
  try{result=await fetch('/api/'+path,{method,headers:{...(body!==undefined?{'Content-Type':'application/json'}:{})},credentials:'same-origin',body:body!==undefined?JSON.stringify(body):undefined})}
  catch(e){throw Error('ارتباط با سرور برقرار نشد')}
  let data;try{data=await result.json()}catch{data={detail:'پاسخ نامعتبر سرور'}}
- if(!result.ok){if(result.status===401&&state.me){state.me=null;renderAuth()}throw Error(typeof data.detail==='string'?data.detail:'خطایی در درخواست رخ داد')}
+ if(!result.ok){if(result.status===401&&state.me){const wasDemo=!!state.me.public_demo;state.me=null;wasDemo?renderShowroomUnavailable():renderAuth()}throw Error(typeof data.detail==='string'?data.detail:'خطایی در درخواست رخ داد')}
  return data;
 }
 async function lookup(resource,reload=false){if(!state.lookups[resource]||reload){const r=await api(`data/${resource}?limit=100`);state.lookups[resource]=r.items||[]}return state.lookups[resource]}
