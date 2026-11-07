@@ -550,6 +550,54 @@ def record_return(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=De
     except IntegrityError:db.rollback();raise HTTPException(409,'درخواست مرجوعی تکراری است')
     return as_dict(obj)
 
+def _settlement_state(db:Session,ctx,return_id:str):
+    obj=tenant_object(db,Return,ctx['tenant'],return_id,lock=True)
+    doc=tenant_object(db,SalesOrder if obj.direction=='sale' else PurchaseOrder,
+                      ctx['tenant'],obj.order_id or obj.purchase_id,lock=True)
+    used=int(db.query(func.coalesce(func.sum(AccountEntry.amount),0)).filter(
+        AccountEntry.tenant_id==ctx['tenant'],AccountEntry.reference==obj.id,
+        AccountEntry.direction==('out' if obj.direction=='sale' else 'in')).scalar() or 0)
+    linked=db.query(Return.id).filter_by(tenant_id=ctx['tenant'],direction=obj.direction,
+                    **({'order_id':doc.id} if obj.direction=='sale' else {'purchase_id':doc.id})).all()
+    ids=[row[0] for row in linked]
+    all_used=int(db.query(func.coalesce(func.sum(AccountEntry.amount),0)).filter(
+        AccountEntry.tenant_id==ctx['tenant'],AccountEntry.reference.in_(ids),
+        AccountEntry.direction==('out' if obj.direction=='sale' else 'in')).scalar() or 0)
+    remaining=max(0,min(obj.amount-used,doc.paid-all_used))
+    return obj,doc,used,remaining
+
+@app.get('/api/returns/{return_id}/settlement')
+def return_settlement_state(return_id:str,db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE)
+    obj,doc,used,remaining=_settlement_state(db,ctx,return_id)
+    return {'return_id':obj.id,'direction':obj.direction,'return_amount':obj.amount,
+            'settled':used,'remaining':remaining,'document_number':doc.number}
+
+@app.post('/api/returns/{return_id}/settle')
+def settle_return(return_id:str,body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    """Manually record a return refund or supplier reimbursement, never a gateway charge."""
+    authorized(ctx,FINANCE)
+    tid=ctx['tenant']
+    obj,doc,used,remaining=_settlement_state(db,ctx,return_id)
+    key=require_string(body.get('idempotency_key'),'شناسه یکتا',150)
+    if db.query(EventKey).filter_by(tenant_id=tid,kind='return_settlement',key=key).first():
+        raise HTTPException(409,'این تسویه قبلاً ثبت شده است')
+    value=positive(body.get('amount'),'مبلغ')
+    if value>remaining:raise HTTPException(409,'مبلغ بیشتر از مانده قابل تسویه است')
+    account=tenant_object(db,CashAccount,tid,body.get('account_id'))
+    direction='out' if obj.direction=='sale' else 'in'
+    entry=AccountEntry(tenant_id=tid,account_id=account.id,direction=direction,amount=value,
+                       reference=obj.id,note='تسویه مرجوعی '+doc.number)
+    db.add(entry);db.flush()
+    db.add(EventKey(tenant_id=tid,kind='return_settlement',key=key,reference_id=obj.id))
+    audit(db,ctx,'settle_return','returns',obj.id,{'amount':value,'account_id':account.id})
+    notification(db,tid,'تسویه مرجوعی',f'تسویه {value:,} تومان برای {doc.number} ثبت شد.','finance')
+    try:db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,'تسویه تکراری یا نامعتبر است')
+    return {'entry':as_dict(entry),'remaining':remaining-value}
+
 @app.get('/api/dashboard')
 def dashboard(db:Session=Depends(db_session),ctx:dict=Depends(principal)):
     tid=ctx['tenant']
