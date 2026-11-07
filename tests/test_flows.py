@@ -58,6 +58,8 @@ def test_full_flow_and_tenant_isolation():
     payment={'sale_id':oid,'amount':2200,'method':'cash','account_id':cash['id'],'idempotency_key':'alice-sale-payment-1'}
     assert a.post('/api/payments',json=payment).json()['duplicate']==False
     assert a.post('/api/payments',json=payment).json()['duplicate']==True
+    assert a.post('/api/payments',json={**payment,'amount':2201}).status_code==409
+    assert a.post('/api/payments',json={**payment,'sale_id':'different'}).status_code==409
     assert a.post('/api/payments',json={**payment,'idempotency_key':'2','amount':999999}).status_code==409
     ret=a.post('/api/returns',json={'direction':'sale','order_id':oid,'variant_id':var['id'],'quantity':2,'restock':True})
     assert ret.status_code==200,ret.text
@@ -103,3 +105,9 @@ def test_cross_origin_mutation_returns_403_not_500():
                          headers={'Origin':'https://malicious.example'})
     assert response.status_code==403, response.text
     assert response.json()['detail']=='درخواست از مبدأ غیرمجاز'
+
+def test_database_readiness():
+    client=TestClient(app)
+    r=client.get('/api/ready')
+    assert r.status_code==200,r.text
+    assert r.json()=={'ok':True,'database':'connected'}
