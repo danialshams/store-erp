@@ -213,10 +213,26 @@ class SalesLine(Entity,Base):
     variant_id: Mapped[str]=mapped_column(String(36),ForeignKey('variants.id'),nullable=False)
     quantity: Mapped[int]=mapped_column(Integer,nullable=False)
     returned: Mapped[int]=mapped_column(Integer,default=0)
+    fulfilled: Mapped[int]=mapped_column(Integer,default=0)
     price: Mapped[int]=mapped_column(BigInteger,nullable=False)
     cost_snapshot: Mapped[int]=mapped_column(BigInteger,default=0)
-    __table_args__=(CheckConstraint('quantity > 0 AND price >= 0 AND returned >= 0 AND returned <= quantity'),)
+    __table_args__=(CheckConstraint('quantity > 0 AND price >= 0 AND returned >= 0 AND returned <= fulfilled AND fulfilled >= 0 AND fulfilled <= quantity'),)
 
+
+class Fulfillment(Entity,Base):
+    """One partial or complete stock release with immutable line snapshot."""
+    __tablename__='fulfillments'
+    order_id: Mapped[str]=mapped_column(String(36),ForeignKey('sales_orders.id'),nullable=False)
+    warehouse_id: Mapped[str]=mapped_column(String(36),ForeignKey('warehouses.id'),nullable=False)
+    number: Mapped[str]=mapped_column(String(60),nullable=False)
+    status: Mapped[str]=mapped_column(String(25),default='shipped',nullable=False)
+    items: Mapped[list]=mapped_column(JSON,default=list,nullable=False)
+    revenue: Mapped[int]=mapped_column(BigInteger,default=0,nullable=False)
+    cost: Mapped[int]=mapped_column(BigInteger,default=0,nullable=False)
+    carrier: Mapped[str|None]=mapped_column(String(120))
+    tracking_number: Mapped[str|None]=mapped_column(String(120))
+    __table_args__=(UniqueConstraint('tenant_id','number'),
+                    CheckConstraint('revenue >= 0 AND cost >= 0'),)
 
 class Invoice(Entity,Base):
     """Internal immutable sales invoice snapshot; not a government tax invoice."""
