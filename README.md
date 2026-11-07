@@ -4,6 +4,16 @@
 
 > **وضعیت: هستهٔ عملیاتی قابل آزمایش، نه نسخهٔ آمادهٔ استفادهٔ تجاری.** امکانات تکمیل‌نشده و گیت‌های انتشار در انتهای این فایل مشخص شده‌اند. ورود به محیط واقعی بدون ممیزی امنیتی، تست PostgreSQL و پشتیبان‌گیری توصیه نمی‌شود.
 
+## Public showroom mode (temporary, read-only)
+
+To demonstrate the full panel without a sign-in page, apply `migrations/0003_seed_public_demo.sql` **after migrations 0001 and 0002**, then set `PUBLIC_DEMO_ENABLED=true` on the preview deployment. This is an additive, idempotent seed: it inserts a dedicated tenant `demo-erp-tenant-2026`, a synthetic unloginable demo user, and thousands of fictional records, and it does not delete or modify existing customers.
+
+With this flag enabled, anonymous **GET/HEAD** requests are restricted to the demo tenant and the UI shows all sections with explicit read-only messaging. Anonymous **POST/PATCH/PUT/DELETE** calls return HTTP 403. Real signed-in sessions retain their original tenant identity and permissions. A visitor cannot access a real tenant without a valid signed user session. Set `PUBLIC_DEMO_ENABLED=false` later to restore the regular sign-in screen and standard authentication flow; never remove authorization from the backend.
+
+Seeded sections include catalog/categories/variants, customers, suppliers, warehouses, batches, stock and movements, transfers, purchases and lines, sales and lines, invoices, manual payments, returns, shipments, price lists, cash accounts, tax rates, team, notifications, and audit logs. Every contact is fictional and uses `example.invalid` where an email is shown. The demo cannot modify balances, initiate transactions, send messages, or trigger external integrations.
+
+**Status:** the public showroom is a demonstration of the currently implemented ERP workflows. It does not mean all commercial launch gates are finished.
+
 ## Technology
 
 - Python 3.12+, FastAPI, SQLAlchemy 2, PostgreSQL 14+ (production), SQLite (local automated tests only)

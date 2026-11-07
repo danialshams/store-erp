@@ -2,7 +2,7 @@
 import os, secrets, hmac, hashlib, time, base64, json
 from fastapi import HTTPException, Request
 from sqlalchemy.orm import Session
-from .models import User, Member
+from .models import User, Member, Tenant
 
 SECRET=os.environ.get('APP_SECRET', '')
 if not SECRET:
@@ -48,9 +48,24 @@ def parse_token(token):
         return obj if int(obj['exp']) > time.time() else None
     except Exception:return None
 
+DEMO_TENANT_ID='demo-erp-tenant-2026'
+DEMO_USER_ID='demo-erp-user-public'
+
+def public_demo_enabled() -> bool:
+    return os.environ.get('PUBLIC_DEMO_ENABLED','false').strip().lower()=='true'
+
 def context(request:Request,db:Session):
     auth=request.cookies.get('erp_session')
-    if not auth: raise HTTPException(401,'ابتدا وارد شوید')
+    if not auth:
+        if public_demo_enabled() and request.method in ('GET','HEAD'):
+            # The public preview is an isolated tenant, never a real-user session.
+            # This branch is read only; all anonymous writes are rejected upstream.
+            tenant=db.get(Tenant,DEMO_TENANT_ID)
+            user=db.get(User,DEMO_USER_ID)
+            if tenant is None or user is None or not user.active:
+                raise HTTPException(503,'داده‌های دموی عمومی هنوز آماده نیست')
+            return {'user':user,'tenant':tenant.id,'role':'owner','public_demo':True}
+        raise HTTPException(401,'ابتدا وارد شوید')
     claims=parse_token(auth)
     if not claims: raise HTTPException(401,'نشست منقضی شده است')
     user=db.get(User,claims['u'])

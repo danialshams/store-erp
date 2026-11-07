@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .db import Session as DbSession, init_db, engine
 from .models import *
-from .security import issue_token, make_password, verify_password, context, authorized, csrf_guard, ROLES, ALL, CATALOG, WAREHOUSE, SALES, PURCHASE, FINANCE
+from .security import issue_token, make_password, verify_password, context, authorized, csrf_guard, public_demo_enabled, ROLES, ALL, CATALOG, WAREHOUSE, SALES, PURCHASE, FINANCE
 
 app=FastAPI(title='ERP فروشگاهی',docs_url='/api/docs',openapi_url='/api/openapi.json',redoc_url=None)
 PUBLIC=Path(__file__).resolve().parent.parent/'public'
@@ -27,6 +27,12 @@ if PUBLIC.is_dir():
 
 @app.middleware('http')
 async def safety_middleware(request:Request,call_next):
+    if (public_demo_enabled() and request.url.path.startswith('/api/')
+            and request.method in ('POST','PUT','PATCH','DELETE')
+            and not request.cookies.get('erp_session')):
+        # Public visitors can browse an isolated demo but never mutate it.
+        # Authenticated customer sessions still use their own tenant and permissions.
+        return JSONResponse({'detail':'نسخه نمایشی فقط برای مشاهده است'},status_code=403)
     if request.url.path.startswith('/api/'):
         try:
             csrf_guard(request)
@@ -93,7 +99,7 @@ def secure_cookie(response,token):
     response.set_cookie('erp_session',token,httponly=True,secure=(os.environ.get('COOKIE_SECURE','true' if os.environ.get('VERCEL') else 'false').lower()=='true'),samesite='lax',max_age=604800,path='/')
 
 def account_info(db,ctx):
-    return {'name':ctx['user'].name,'email':ctx['user'].email,'user_id':ctx['user'].id,'tenant_id':ctx['tenant'],'tenant':db.get(Tenant,ctx['tenant']).name,'role':ctx['role']}
+    return {'name':ctx['user'].name,'email':ctx['user'].email,'user_id':ctx['user'].id,'tenant_id':ctx['tenant'],'tenant':db.get(Tenant,ctx['tenant']).name,'role':ctx['role'],'public_demo':bool(ctx.get('public_demo'))}
 
 @app.post('/api/auth/register')
 def register(body:dict=Body(...),db:Session=Depends(db_session)):
