@@ -40,4 +40,26 @@ jobs:
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0003_seed_public_demo.sql
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0003_seed_public_demo.sql
           python -c "from api.db import engine; from sqlalchemy import inspect; n=len(inspect(engine).get_table_names()); print(f'PostgreSQL tables: {n}'); assert n >= 32"
+          psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0004_tenant_rls.sql
+          psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE erp_rls_test;
+          GRANT USAGE ON SCHEMA public TO erp_rls_test;
+          GRANT SELECT ON public.products TO erp_rls_test;
+          BEGIN;
+          SET ROLE erp_rls_test;
+          DO $block$
+          BEGIN
+            IF (SELECT COUNT(*) FROM products) <> 0 THEN
+              RAISE EXCEPTION 'RLS should block missing tenant scope';
+            END IF;
+          END $block$;
+          SELECT set_config('erp.tenant_id','demo-erp-tenant-2026',true);
+          DO $block$
+          BEGIN
+            IF (SELECT COUNT(*) FROM products) <> 96 THEN
+              RAISE EXCEPTION 'RLS should show 96 demo products';
+            END IF;
+          END $block$;
+          ROLLBACK;
+          SQL
 
