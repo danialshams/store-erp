@@ -21,7 +21,8 @@ from .security import issue_token, make_password, verify_password, context, auth
 
 app=FastAPI(title='ERP فروشگاهی',docs_url='/api/docs',openapi_url='/api/openapi.json',redoc_url=None)
 PUBLIC=Path(__file__).resolve().parent.parent/'public'
-app.mount('/assets',StaticFiles(directory=str(PUBLIC)),name='assets')
+if PUBLIC.is_dir():
+    app.mount('/assets', StaticFiles(directory=str(PUBLIC)), name='assets')
 
 @app.middleware('http')
 async def safety_middleware(request:Request,call_next):
