@@ -292,6 +292,15 @@ class JournalLine(Entity,Base):
     note: Mapped[str|None]=mapped_column(String(250))
     __table_args__=(CheckConstraint('(debit > 0 AND credit = 0) OR (credit > 0 AND debit = 0)'),)
 
+class Integration(Entity,Base):
+    """Safe provider configuration metadata. Never store external credentials."""
+    __tablename__='integrations'
+    kind: Mapped[str]=mapped_column(String(35),nullable=False)
+    provider: Mapped[str]=mapped_column(String(80),default='',nullable=False)
+    settings: Mapped[dict]=mapped_column(JSON,default=dict,nullable=False)
+    enabled: Mapped[bool]=mapped_column(Boolean,default=False,nullable=False)
+    __table_args__=(UniqueConstraint('tenant_id','kind'),)
+
 class Tax(Entity,Base):
     __tablename__='tax_rates'
     name: Mapped[str]=mapped_column(String(100),nullable=False)
