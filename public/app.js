@@ -138,6 +138,9 @@ function actionBtns(resource,item){
  if(allowed && resource==='transfers'){
   const act={draft:['ship','ارسال'],shipped:['receive','دریافت']}[item.status];if(act)out+=`<button class="btn btn-small btn-primary" data-workflow="transfers:${item.id}:${act[0]}">${act[1]} ${icon('check',14)}</button>`;
  }
+ if(state.me?.public_demo&&['purchases','sales','returns','transfers','shipments','stocks','payments'].includes(resource)){
+  out+=`<button class="btn btn-small btn-outline" type="button" data-demo-workflow="${esc(resource)}">نمایش امکانات ${icon('file',14)}</button>`;
+ }
  if(allowed && resource==='purchases'){
    if(!['received','cancelled'].includes(item.status))out+=`<button class="btn btn-small btn-primary" data-workflow="purchases:${item.id}:receive">دریافت کالا ${icon('check',14)}</button>`;
    if(['received','partial'].includes(item.status))out+=`<button class="btn btn-small btn-light" data-document-action="purchase-return:${item.id}">مرجوعی ${icon('returns',14)}</button>`;
@@ -181,11 +184,29 @@ async function renderCycleCount(selectedWarehouse){
  ${state.me?.public_demo?'':`<div class="row" style="margin-top:16px"><button class="btn btn-primary" id="cycle-submit" type="submit" ${!result.items.length?'disabled':''}>ثبت انبارگردانی ${icon('check',16)}</button></div>`}</form>`;
 }
 
+function openDemoWorkflow(resource){
+ const details={
+   sales:['ثبت سفارش با چند قلم کالا، تخفیف و کانال فروش','تأیید سفارش و کنترل موجودی رزروشده','تحویل کامل یا جزئی و ثبت گردش انبار','ثبت دریافت وجه، صدور فاکتور و مرجوعی'],
+   purchases:['ثبت سفارش تأمین‌کننده با چند کالا','دریافت کامل یا چندمرحله‌ای و ثبت خودکار موجودی','تسویه تأمین‌کننده و ثبت مرجوعی خرید'],
+   transfers:['انتخاب انبار مبدأ و مقصد و کالا','ارسال انتقال با ثبت خروج موجودی','ثبت دریافت در مقصد و دفتر گردش'],
+   returns:['برگشت کالاهای فروش یا خرید','تصمیم‌گیری درباره بازگشت به موجودی','تسویه وجه همراه با ثبت مالی و حسابرسی'],
+   shipments:['انتخاب سفارش، حمل‌کننده و شماره رهگیری','ثبت وضعیت ارسال، تحویل یا برگشت','مشاهده سوابق ارسال‌های کامل و جزئی'],
+   stocks:['اصلاح موجودی با دلیل و ثبت سند گردش','شمارش انبار و جلوگیری از اختلاف هم‌زمان','ردیابی بچ، تاریخ انقضا و شماره سریال'],
+   payments:['ثبت دستی دریافت یا پرداخت روی سفارش','انتساب حساب بانکی یا صندوق','کنترل تراکنش تکراری و تطبیق مبلغ'],
+ };
+ const rows=details[resource]||['گردش کاری این ماژول بر اساس داده واقعی انجام می‌شود'];
+ const html='<div class="notice">این پنجره قابلیت‌های این ماژول را توضیح می‌دهد. در دموی عمومی عملیات واقعی عمداً غیرفعال است.</div><ol style="padding-inline-start:24px;line-height:2.3">'+
+   rows.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ol>';
+ showModal('قابلیت‌های '+titleOf(resource),html,null,{save:'متوجه شدم'});
+}
+
 async function renderResource(){
  const resource=state.view,meta=META[resource];
  const url=`data/${resource}?page=${state.page}&limit=25&search=${encodeURIComponent(state.search)}`;
  const result=await api(url);state.data[resource]=result.items;
- const btn=(resource==='stocks'&&roleCan('stocks'))?`<button class="btn btn-outline" id="register-serials">ثبت سریال ${icon('plus',16)}</button><button class="btn btn-primary" id="adjust-stock">اصلاح موجودی ${icon('plus',17)}</button>`:(!meta.readonly&&roleCan(resource))?`<button class="btn btn-primary" id="new-record">${meta.special==='sale'?'سفارش جدید':meta.special==='purchase'?'سفارش خرید جدید':meta.special==='transfer'?'انتقال جدید':(CREATE_LABEL[resource]||titleOf(resource)+' جدید')} ${icon('plus',17)}</button>`:'';
+ const btn=(state.me?.public_demo&&!meta.readonly)?
+   `<button class="btn btn-primary" id="new-record">مشاهده فرم ${icon('file',17)}</button>`:
+   (resource==='stocks'&&roleCan('stocks'))?`<button class="btn btn-outline" id="register-serials">ثبت سریال ${icon('plus',16)}</button><button class="btn btn-primary" id="adjust-stock">اصلاح موجودی ${icon('plus',17)}</button>`:(!meta.readonly&&roleCan(resource))?`<button class="btn btn-primary" id="new-record">${meta.special==='sale'?'سفارش جدید':meta.special==='purchase'?'سفارش خرید جدید':meta.special==='transfer'?'انتقال جدید':(CREATE_LABEL[resource]||titleOf(resource)+' جدید')} ${icon('plus',17)}</button>`:'';
  const csvLink=`<a class="btn btn-outline" href="/api/export/${encodeURIComponent(resource)}.csv" target="_blank" rel="noopener noreferrer">خروجی CSV ${icon('download',15)}</a>`;
  const headHtml=head(titleOf(resource),`مشاهده و مدیریت اطلاعات ${titleOf(resource)} در سازمان شما`,csvLink+btn);
  const cols=[...meta.cols];const rows=result.items.map(item=>{
@@ -199,8 +220,12 @@ async function renderResource(){
 }
 let modalSubmit=null;
 function showModal(title,content,onSubmit,{wide=false,save='ذخیره تغییرات'}={}){
- modalSubmit=onSubmit;
- modals.innerHTML=`<div class="overlay" id="overlay"><div class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}" style="${wide?'width:min(100%,760px)':''}"><div class="modal-head"><strong>${esc(title)}</strong><button type="button" class="x-btn" id="modal-close" aria-label="بستن">×</button></div><form id="modal-form"><div class="modal-content">${content}</div><div class="modal-footer"><button class="btn btn-light" type="button" id="modal-cancel">انصراف</button><button class="btn btn-primary" type="submit" id="modal-save">${esc(save)} ${icon('check',16)}</button></div></form></div></div>`;
+ const preview=Boolean(state.me?.public_demo);
+ modalSubmit=preview?null:onSubmit;
+ if(preview){
+  content='<div class="notice" role="status" style="margin-bottom:16px"><strong>پیش‌نمایش فرم</strong> — می‌توانید همه فیلدها و مراحل را مشاهده کنید. این نسخه عمومی فقط خواندنی است و اطلاعات ذخیره نمی‌شوند.</div>'+content;
+ }
+ modals.innerHTML=`<div class="overlay" id="overlay"><div class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}" style="${wide?'width:min(100%,760px)':''}"><div class="modal-head"><strong>${esc(title)}</strong><button type="button" class="x-btn" id="modal-close" aria-label="بستن">×</button></div><form id="modal-form"><div class="modal-content">${content}</div><div class="modal-footer"><button class="btn btn-light" type="button" id="modal-cancel">انصراف</button>${preview?'<span class="pill good">نمایش بدون ذخیره</span>':`<button class="btn btn-primary" type="submit" id="modal-save">${esc(save)} ${icon('check',16)}</button>`}</div></form></div></div>`;
  $('#modal-form input:not([type=hidden]),#modal-form select')?.focus();
 }
 function closeModal(){modalSubmit=null;modals.innerHTML=''}
@@ -690,6 +715,7 @@ root.addEventListener('click',async e=>{
  if(btn.id==='logout'){await api('auth/logout',{method:'POST'});renderAuth();notify('از حساب خارج شدید');return}
  if(btn.id==='notif-toggle'){state.notifOpen=!state.notifOpen;$('#notif-pop')?.classList.toggle('hide',!state.notifOpen);return}
  if(btn.id==='retry-view')return loadView();
+ if(btn.hasAttribute('data-demo-workflow'))return openDemoWorkflow(btn.dataset.demoWorkflow);
  if(btn.id==='new-record'){
   if(state.view==='transfers')return openTransfer();
   if(state.view==='purchases'||state.view==='sales')return openDocument(state.view);
