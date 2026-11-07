@@ -101,7 +101,7 @@ jobs:
           RESTORE_DATABASE_URL: postgresql://erp:ci-only-secret@localhost:5432/erp_restore
         run: |
           bash scripts/backup.sh /tmp/store-erp-ci.dump
-          createdb 'postgresql://erp:ci-only-secret@localhost:5432/erp' -O erp erp_restore
+          psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -c 'CREATE DATABASE erp_restore OWNER erp'
           bash scripts/restore.sh /tmp/store-erp-ci.dump
           test "$(psql "$RESTORE_DATABASE_URL" -tAc "SELECT count(*) FROM products WHERE tenant_id='demo-erp-tenant-2026'")" -eq 96
           test "$(psql "$RESTORE_DATABASE_URL" -tAc "SELECT count(*) FROM fulfillments WHERE tenant_id='demo-erp-tenant-2026'")" -ge 70
