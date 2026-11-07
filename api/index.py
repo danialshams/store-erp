@@ -471,7 +471,7 @@ def adjust(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(p
     if type(delta) is not int or delta==0 or abs(delta)>1_000_000:raise HTTPException(422,'تغییر موجودی نامعتبر')
     reason=require_string(body.get('reason'),'دلیل',100)
     if reason not in ['opening','correction','damage','loss','cycle_count']:raise HTTPException(422,'دلیل معتبر نیست')
-    stock=_stock(db,ctx,body.get('warehouse_id'),body.get('variant_id'),delta,reason,note=body.get('note'))
+    stock=_stock(db,ctx,body.get('warehouse_id'),body.get('variant_id'),delta,reason,note=body.get('note'),lot=body.get('lot'),expiry_date=body.get('expiry_date'),serials=body.get('serials'))
     cost=tenant_object(db,Variant,ctx['tenant'],body.get('variant_id')).purchase_cost
     value=abs(delta*cost)
     if value:
@@ -626,7 +626,13 @@ def receive_purchase(purchase_id:str,body:dict=Body(default={}),db:Session=Depen
     lines=db.query(PurchaseLine).filter_by(tenant_id=ctx['tenant'],order_id=order.id).with_for_update().all()
     provided=body.get('items')
     if provided is not None and (not isinstance(provided,list) or not provided):raise HTTPException(422,'اقلام نامعتبر')
-    desired={item['line_id']:positive(item['quantity']) for item in provided} if provided else {l.id:l.quantity-l.received for l in lines if l.quantity>l.received}
+    provided_map={}
+    if provided:
+        for item in provided:
+            if not isinstance(item,dict) or not item.get('line_id') or item['line_id'] in provided_map:
+                raise HTTPException(422,'ردیف دریافتی نامعتبر یا تکراری است')
+            provided_map[item['line_id']]=item
+    desired={line_id:positive(item.get('quantity')) for line_id,item in provided_map.items()} if provided else {l.id:l.quantity-l.received for l in lines if l.quantity>l.received}
     if not desired:raise HTTPException(409,'قلمی برای دریافت وجود ندارد')
     if set(desired)-{l.id for l in lines}:raise HTTPException(422,'ردیف غیرمجاز')
     received_value=0
@@ -634,7 +640,8 @@ def receive_purchase(purchase_id:str,body:dict=Body(default={}),db:Session=Depen
         q=desired.get(line.id,0)
         if q:
             if q>line.quantity-line.received:raise HTTPException(409,'دریافت بیش از تعداد سفارش')
-            _stock(db,ctx,order.warehouse_id,line.variant_id,q,'purchase_receive',order.id)
+            meta=provided_map.get(line.id,{})
+            _stock(db,ctx,order.warehouse_id,line.variant_id,q,'purchase_receive',order.id,lot=meta.get('lot'),expiry_date=meta.get('expiry_date'),serials=meta.get('serials'))
             line.received+=q
             received_value+=q*line.cost
     if received_value:
@@ -858,7 +865,7 @@ def record_return(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=De
         if qty>line.received-int(prior):raise HTTPException(409,'مرجوعی از دریافتی بیشتر است')
     restock=bool(body.get('restock',True))
     if direction=='purchase':_stock(db,ctx,doc.warehouse_id,vid,-qty,'supplier_return',doc.id)
-    elif restock:_stock(db,ctx,doc.warehouse_id,vid,qty,'customer_return',doc.id)
+    elif restock:_stock(db,ctx,doc.warehouse_id,vid,qty,'customer_return',doc.id,serials=body.get('serials'))
     obj=Return(tenant_id=tid,direction=direction,order_id=doc.id if direction=='sale' else None,purchase_id=doc.id if direction=='purchase' else None,variant_id=vid,warehouse_id=doc.warehouse_id,quantity=qty,amount=qty*(line.price if direction=='sale' else line.cost),restock=restock)
     db.add(obj);db.flush()
     postings=[]
