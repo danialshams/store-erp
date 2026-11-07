@@ -95,3 +95,17 @@ jobs:
           ROLLBACK;
           SQL
 
+      - name: PostgreSQL backup/restore disaster recovery drill
+        env:
+          DATABASE_URL: postgresql+psycopg2://erp:ci-only-secret@localhost:5432/erp
+          RESTORE_DATABASE_URL: postgresql://erp:ci-only-secret@localhost:5432/erp_restore
+        run: |
+          bash scripts/backup.sh /tmp/store-erp-ci.dump
+          createdb 'postgresql://erp:ci-only-secret@localhost:5432/erp' -O erp erp_restore
+          bash scripts/restore.sh /tmp/store-erp-ci.dump
+          test "$(psql "$RESTORE_DATABASE_URL" -tAc "SELECT count(*) FROM products WHERE tenant_id='demo-erp-tenant-2026'")" -eq 96
+          test "$(psql "$RESTORE_DATABASE_URL" -tAc "SELECT count(*) FROM fulfillments WHERE tenant_id='demo-erp-tenant-2026'")" -ge 70
+          test "$(psql "$RESTORE_DATABASE_URL" -tAc "SELECT count(*) FROM pg_constraint WHERE conname LIKE 'fk_%_tenant'")" -eq 42
+          echo 'PostgreSQL backup and safe restore: PASS'
+
+
