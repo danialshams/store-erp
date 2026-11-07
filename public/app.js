@@ -11,7 +11,7 @@ const ICON={grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y=
 function icon(name,size=18){return `<span class="icon"><svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[name]||ICON.box}</svg></span>`}
 const NAV=[
  ['نمای کلی',[['dashboard','داشبورد','grid'],['notifications','اعلان‌ها','bell']]],
- ['کالا و موجودی',[['products','کالاها','box'],['variants','تنوع و قیمت','layers'],['categories','دسته‌بندی‌ها','tag'],['warehouses','انبارها','warehouse'],['stocks','موجودی کالا','box'],['batches','بچ و تاریخ انقضا','layers'],['expiry-alerts','هشدار انقضا','bell'],['movements','گردش انبار','swap'],['cycle-count','انبارگردانی','check'],['transfers','انتقال بین انبارها','swap']]],
+ ['کالا و موجودی',[['products','کالاها','box'],['variants','تنوع و قیمت','layers'],['categories','دسته‌بندی‌ها','tag'],['warehouses','انبارها','warehouse'],['stocks','موجودی کالا','box'],['batches','بچ و تاریخ انقضا','layers'],['serials','شماره سریال‌ها','tag'],['lot-movements','گردش بچ‌ها','layers'],['expiry-alerts','هشدار انقضا','bell'],['movements','گردش انبار','swap'],['cycle-count','انبارگردانی','check'],['transfers','انتقال بین انبارها','swap']]],
  ['خرید و فروش',[['suppliers','تأمین‌کنندگان','truck'],['purchases','سفارش‌های خرید','cart'],['customers','مشتریان','users'],['sales','فروش و سفارش‌ها','cart'],['returns','مرجوعی‌ها','returns'],['shipments','ارسال و رهگیری','truck']]],
  ['امور مالی',[['invoices','فاکتورهای فروش','file'],['payments','پرداخت‌ها','coins'],['cash-accounts','حساب‌ها','card'],['ledger-accounts','کدینگ حسابداری','layers'],['ledger-journals','اسناد حسابداری','file'],['ledger-balance','تراز آزمایشی','chart'],['ledger-profit','سود و زیان','chart'],['account-entries','گردش حساب‌ها','file'],['price-lists','لیست‌های قیمت','tag'],['price-items','قیمت‌های اختصاصی','tag'],['tax-rates','مالیات‌ها','file'],['reports','گزارش‌ها','chart'],['analytics','تحلیل پیشرفته','chart']]],
  ['مدیریت',[['team','کاربران و دسترسی','users'],['settings','تنظیمات کسب‌وکار','settings'],['integrations','اتصالات آینده','settings'],['audit','تاریخچه عملیات','clock']]]
@@ -28,6 +28,8 @@ const META={
  warehouses:{cols:['name','code','address','active'],fields:['name','code','address','active']},
  stocks:{cols:['variant_id','warehouse_id','quantity','reserved'],readonly:true},
  batches:{cols:['variant_id','warehouse_id','lot','expiry_date','quantity'],readonly:true},
+ serials:{cols:['serial','variant_id','warehouse_id','status','reference_id'],readonly:true},
+ 'lot-movements':{cols:['variant_id','warehouse_id','batch_id','delta','reason','created_at'],readonly:true},
  movements:{cols:['variant_id','warehouse_id','delta','reason','created_at'],readonly:true},
  transfers:{cols:['variant_id','quantity','source_id','destination_id','status'],special:'transfer'},
  suppliers:{cols:['name','phone','email','created_at'],fields:['name','phone','email','address','notes']},
@@ -247,6 +249,49 @@ async function openTransfer(){
   await api('transfers',{method:'POST',body});closeModal();notify('انتقال پیش‌نویس ایجاد شد');loadView();
  },{save:'ثبت انتقال'});
 }
+const serialList=(raw)=>String(raw||'').split(/[\\n,،;]+/).map(x=>x.trim()).filter(Boolean);
+async function openRegisterSerials(){
+ const [warehouses,variants]=await Promise.all([lookup('warehouses'),lookup('variants')]);
+ const tracked=variants.filter(x=>x.track_serial);
+ if(!tracked.length)return notify('ابتدا ردیابی شماره سریال را برای یک کالا فعال کنید',true);
+ const content=`<div class="form-grid">
+ <div class="field"><label>انبار</label>${selectField('warehouse_id',warehouses.map(x=>({id:x.id,label:x.name})))}</div>
+ <div class="field"><label>کالا با ردیابی سریال</label>${selectField('variant_id',tracked.map(x=>({id:x.id,label:x.sku})))}</div>
+ <div class="field full"><label>شماره سریال‌ها (هر خط یک شماره)</label><textarea class="input" name="serials" rows="7" required></textarea></div></div>
+ <p class="notice">این عملیات فقط شماره‌های منحصربه‌فرد را به موجودی قبلاً ثبت‌شده متصل می‌کند؛ موجودی کل را تغییر نمی‌دهد.</p>`;
+ showModal('شناسایی شماره سریال',content,async form=>{
+  const fd=new FormData(form),serials=serialList(fd.get('serials'));
+  await api('serials/register',{method:'POST',body:{warehouse_id:fd.get('warehouse_id'),variant_id:fd.get('variant_id'),serials}});
+  closeModal();notify('شماره سریال‌ها ثبت شدند');loadView();
+ },{save:'ثبت سریال‌ها'});
+}
+async function openReceivePurchase(id){
+ const [doc,variants]=await Promise.all([api('documents/purchases/'+id+'/lines'),lookup('variants')]);
+ const rows=doc.items.filter(x=>x.received<x.quantity);
+ if(!rows.length)return notify('همه اقلام سفارش دریافت شده‌اند',true);
+ const content=`<p class="notice">برای کالاهای بچ‌دار، شماره بچ و تاریخ انقضا را وارد کنید. برای کالای سریالی، سریال‌های هر واحد الزامی است.</p>
+ ${rows.map(line=>{
+   const v=variants.find(x=>x.id===line.variant_id);
+   return `<div class="panel panel-padded receive-line" data-id="${esc(line.id)}" style="margin-top:10px">
+   <strong>${esc(v?.sku||line.variant_id)}</strong> <span class="muted">مانده ${fa(line.quantity-line.received)} عدد</span>
+   <div class="form-grid" style="margin-top:10px"><div class="field"><label>تعداد دریافتی</label><input class="input r-qty" type="number" min="0" max="${line.quantity-line.received}" value="${line.quantity-line.received}" required></div>
+   <div class="field"><label>شماره بچ ${v?.track_batch?'(الزامی)':''}</label><input class="input r-lot" maxlength="100" ${v?.track_batch?'required':''}></div>
+   <div class="field"><label>تاریخ انقضا (اختیاری)</label><input class="input r-expiry" type="date"></div>
+   <div class="field full"><label>سریال‌ها (هر خط یک شماره) ${v?.track_serial?'(الزامی)':''}</label><textarea class="input r-serials" rows="2"></textarea></div></div></div>`;
+ }).join('')}`;
+ showModal('دریافت کالا از تأمین‌کننده',content,async form=>{
+  const items=$('.receive-line',form).map(line=>({
+    line_id:line.dataset.id,quantity:Number(line.querySelector('.r-qty').value),
+    lot:line.querySelector('.r-lot').value.trim(),
+    expiry_date:line.querySelector('.r-expiry').value||null,
+    serials:serialList(line.querySelector('.r-serials').value)
+  })).filter(x=>x.quantity>0);
+  if(!items.length)throw Error('تعداد دریافتی را وارد کنید');
+  await api('purchases/'+id+'/receive',{method:'POST',body:{items,idempotency_key:uid()}});
+  closeModal();notify('دریافت جزئی یا کامل ثبت شد');loadView();
+ },{save:'ثبت رسید کالا',wide:true});
+}
+
 async function openAdjustment(){
  const [warehouses,variants]=await Promise.all([lookup('warehouses'),lookup('variants')]);
  if(!warehouses.length||!variants.length){notify('ابتدا کالا و انبار ثبت کنید',true);return}
@@ -573,6 +618,7 @@ root.addEventListener('click',async e=>{
  if(btn.id==='issue-invoice')return openIssueInvoice();
  if(btn.id==='invoice-prev'){state.page=Math.max(1,state.page-1);return renderInvoices()}
  if(btn.id==='invoice-next'){state.page++;return renderInvoices()}
+ if(btn.id==='register-serials')return openRegisterSerials();
  if(btn.id==='adjust-stock')return openAdjustment();
  if(btn.id==='count-refresh')return renderCycleCount();
  if(btn.id==='count-prev'){state.page=Math.max(1,state.page-1);return renderCycleCount()}
@@ -587,6 +633,7 @@ root.addEventListener('click',async e=>{
  }
  if(btn.hasAttribute('data-workflow')){
   const [resource,id,action]=btn.dataset.workflow.split(':');
+  if(resource==='purchases'&&action==='receive')return openReceivePurchase(id);
   if(!confirm('این عملیات موجودی یا وضعیت سند را تغییر می‌دهد. ادامه می‌دهید؟'))return;
   await api(`${resource}/${id}/${action}`,{method:'POST',body:resource==='purchases'?{idempotency_key:uid()}:{} });notify('وضعیت ثبت شد');return loadView();
  }
