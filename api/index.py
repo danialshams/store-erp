@@ -774,6 +774,7 @@ def _fulfill_sale(db:Session,ctx,order:SalesOrder,desired:dict):
     already=sum(l.fulfilled*l.price for l in lines)
     dispatched=sum(valid[lid].price*qty for lid,qty in desired.items())
     revenue=(order.total*(already+dispatched)//gross-order.total*already//gross) if gross else 0
+    vat=(order.tax_amount*(already+dispatched)//gross-order.tax_amount*already//gross) if gross else 0
     cogs=sum(valid[lid].cost_snapshot*qty for lid,qty in desired.items())
     if revenue<0:raise HTTPException(409,'ارزش ارسالی نامعتبر است')
     snap=[]
@@ -789,7 +790,9 @@ def _fulfill_sale(db:Session,ctx,order:SalesOrder,desired:dict):
                     status='shipped',items=snap,revenue=revenue,cost=cogs)
     db.add(doc);db.flush()
     postings=[]
-    if revenue:postings.extend([('1200',int(revenue),0),('4000',0,int(revenue))])
+    if revenue:postings.append(('1200',int(revenue),0))
+    if revenue-vat:postings.append(('4000',0,int(revenue-vat)))
+    if vat:postings.append(('2100',0,int(vat)))
     if cogs:postings.extend([('5000',int(cogs),0),('1300',0,int(cogs))])
     if postings:
         _post_journal(db,ctx,'fulfillment:'+doc.id,
@@ -978,7 +981,9 @@ def print_invoice(invoice_id:str,db:Session=Depends(db_session),ctx:dict=Depends
     <table><thead><tr><th>SKU</th><th>کالا</th><th>تعداد</th><th>قیمت واحد</th><th>مبلغ</th></tr></thead>
     <tbody>'''+table_rows+'''</tbody></table>
     <div class="total">جمع ردیف‌ها: '''+formatted(inv.subtotal)+'''<br>
-    تخفیف: '''+formatted(inv.discount)+'''<br>مبلغ نهایی: '''+formatted(inv.total)+'''</div>
+    تخفیف: '''+formatted(inv.discount)+'''<br>
+    مالیات ('+safe(inv.tax_name or 'بدون مالیات')+'): '''+formatted(inv.tax_amount)+'''<br>
+    مبلغ نهایی: '''+formatted(inv.total)+'''</div>
     <div class="no-tax">این سند فاکتور داخلی فروشگاه است و فاکتور رسمی یا دارای تأییدیه سازمان امور مالیاتی نیست.</div>
     </body></html>'''
     return HTMLResponse(html_doc)
@@ -1045,8 +1050,15 @@ def record_return(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=De
     line_model=SalesLine if direction=='sale' else PurchaseLine
     line=db.query(line_model).filter_by(tenant_id=tid,order_id=doc.id,variant_id=vid).with_for_update().first()
     if not line:raise HTTPException(422,'کالا در سند وجود ندارد')
+    sale_refund=0;tax_refund=0
     if direction=='sale':
         if qty>line.fulfilled-line.returned:raise HTTPException(409,'تعداد مرجوعی از کالای تحویل‌شده بیشتر است')
+        order_lines=db.query(SalesLine).filter_by(tenant_id=tid,order_id=doc.id).all()
+        gross=sum(x.quantity*x.price for x in order_lines)
+        before=sum(x.returned*x.price for x in order_lines)
+        after=before+qty*line.price
+        sale_refund=(doc.total*after//gross-doc.total*before//gross) if gross else 0
+        tax_refund=(doc.tax_amount*after//gross-doc.tax_amount*before//gross) if gross else 0
         line.returned+=qty
     else:
         prior=db.query(func.coalesce(func.sum(Return.quantity),0)).filter_by(tenant_id=tid,purchase_id=doc.id,variant_id=vid,direction='purchase').scalar()
@@ -1054,12 +1066,14 @@ def record_return(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=De
     restock=bool(body.get('restock',True))
     if direction=='purchase':_stock(db,ctx,doc.warehouse_id,vid,-qty,'supplier_return',doc.id)
     elif restock:_stock(db,ctx,doc.warehouse_id,vid,qty,'customer_return',doc.id,serials=body.get('serials'))
-    obj=Return(tenant_id=tid,direction=direction,order_id=doc.id if direction=='sale' else None,purchase_id=doc.id if direction=='purchase' else None,variant_id=vid,warehouse_id=doc.warehouse_id,quantity=qty,amount=qty*(line.price if direction=='sale' else line.cost),restock=restock)
+    obj=Return(tenant_id=tid,direction=direction,order_id=doc.id if direction=='sale' else None,purchase_id=doc.id if direction=='purchase' else None,variant_id=vid,warehouse_id=doc.warehouse_id,quantity=qty,amount=(sale_refund if direction=='sale' else qty*line.cost),restock=restock)
     db.add(obj);db.flush()
     postings=[]
     if obj.amount:
         if direction=='sale':
-            postings.extend([('4100',obj.amount,0),('1200',0,obj.amount)])
+            if obj.amount-tax_refund:postings.append(('4100',obj.amount-tax_refund,0))
+            if tax_refund:postings.append(('2100',tax_refund,0))
+            postings.append(('1200',0,obj.amount))
         else:
             postings.extend([('2000',obj.amount,0),('1300',0,obj.amount)])
     if direction=='sale' and restock and line.cost_snapshot>0:
