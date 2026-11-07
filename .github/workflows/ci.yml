@@ -36,4 +36,5 @@ jobs:
           APP_SECRET: ci-only-insecure-test-signing-secret
         run: |
           python -m api.init_db
-          python -c "from api.db import engine; from sqlalchemy import inspect; n=len(inspect(engine).get_table_names()); print(f'PostgreSQL tables: {n}'); assert n >= 30"
+          psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0002_invoices.sql
+          python -c "from api.db import engine; from sqlalchemy import inspect; n=len(inspect(engine).get_table_names()); print(f'PostgreSQL tables: {n}'); assert n >= 32"

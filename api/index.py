@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 import os
+from html import escape as html_escape
 from fastapi import FastAPI, Request, HTTPException, Depends, Body, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, func, text, or_
 from sqlalchemy.exc import IntegrityError
@@ -478,6 +479,98 @@ def sale_action(sale_id:str,action:str,db:Session=Depends(db_session),ctx:dict=D
     else:raise HTTPException(409,'انتقال وضعیت غیرمجاز است')
     audit(db,ctx,action,'sales',order.id)
     db.commit();return as_dict(order)
+
+@app.post('/api/invoices')
+def issue_invoice(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    """Issue one immutable internal invoice for a confirmed/fulfilled sale."""
+    authorized(ctx,SALES|FINANCE)
+    tid=ctx['tenant']
+    order=tenant_object(db,SalesOrder,tid,body.get('order_id'),lock=True)
+    if order.status not in ('confirmed','fulfilled'):
+        raise HTTPException(409,'فاکتور تنها برای فروش تأیید یا تحویل‌شده صادر می‌شود')
+    existing=db.query(Invoice).filter_by(tenant_id=tid,order_id=order.id).first()
+    if existing:return {'duplicate':True,'invoice':as_dict(existing)}
+    lines=db.query(SalesLine).filter_by(tenant_id=tid,order_id=order.id).all()
+    if not lines:raise HTTPException(409,'سفارش بدون قلم است')
+    subtotal=sum(l.quantity*l.price for l in lines)
+    if subtotal-order.discount!=order.total:
+        raise HTTPException(409,'مبلغ سفارش و ردیف‌ها با هم سازگار نیستند')
+    customer=tenant_object(db,Customer,tid,order.customer_id) if order.customer_id else None
+    obj=Invoice(tenant_id=tid,order_id=order.id,number=_number('INV'),
+                customer_name=customer.name if customer else 'مشتری حضوری',
+                customer_address=customer.address or '' if customer else '',
+                subtotal=subtotal,discount=order.discount,total=order.total,
+                issuer_id=ctx['user'].id)
+    db.add(obj);db.flush()
+    for item in lines:
+        var=tenant_object(db,Variant,tid,item.variant_id)
+        db.add(InvoiceLine(tenant_id=tid,invoice_id=obj.id,variant_id=var.id,
+                           sku_snapshot=var.sku,name_snapshot=var.name,
+                           quantity=item.quantity,price=item.price))
+    audit(db,ctx,'issue_invoice','invoices',obj.id,{'order_id':order.id})
+    notification(db,tid,'فاکتور داخلی صادر شد',f'فاکتور {obj.number} برای سفارش {order.number} ثبت شد.','finance')
+    try:db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing=db.query(Invoice).filter_by(tenant_id=tid,order_id=order.id).first()
+        if existing:return {'duplicate':True,'invoice':as_dict(existing)}
+        raise HTTPException(409,'شماره فاکتور تکراری یا نامعتبر است')
+    return {'duplicate':False,'invoice':as_dict(obj)}
+
+@app.get('/api/invoices')
+def list_invoices(page:int=Query(1,ge=1,le=100000),limit:int=Query(25,ge=1,le=100),
+                  db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,ALL)
+    q=db.query(Invoice).filter_by(tenant_id=ctx['tenant'])
+    total=q.count()
+    records=q.order_by(Invoice.created_at.desc()).offset((page-1)*limit).limit(limit).all()
+    return {'items':[as_dict(x) for x in records],'total':total,'page':page,'limit':limit}
+
+@app.get('/api/invoices/{invoice_id}')
+def get_invoice(invoice_id:str,db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,ALL)
+    obj=tenant_object(db,Invoice,ctx['tenant'],invoice_id)
+    rows=db.query(InvoiceLine).filter_by(tenant_id=ctx['tenant'],invoice_id=obj.id).all()
+    company=db.get(Tenant,ctx['tenant'])
+    return {'invoice':as_dict(obj),'items':[as_dict(x) for x in rows],
+            'company':{'name':company.name,'phone':company.phone,'address':company.address}}
+
+@app.get('/api/invoices/{invoice_id}/print',response_class=HTMLResponse)
+def print_invoice(invoice_id:str,db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    """Printable internal commercial invoice, not a certified tax invoice."""
+    authorized(ctx,ALL)
+    inv=tenant_object(db,Invoice,ctx['tenant'],invoice_id)
+    company=db.get(Tenant,ctx['tenant'])
+    rows=db.query(InvoiceLine).filter_by(tenant_id=ctx['tenant'],invoice_id=inv.id).all()
+    safe=lambda v: html_escape(str(v or ''))
+    formatted=lambda n: format(n,',')+' تومان'
+    table_rows=''.join(
+        '<tr><td>'+safe(x.sku_snapshot)+'</td><td>'+safe(x.name_snapshot)+'</td><td>'+str(x.quantity)+
+        '</td><td>'+formatted(x.price)+'</td><td>'+formatted(x.quantity*x.price)+'</td></tr>'
+        for x in rows)
+    html_doc='''<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>فاکتور داخلی</title><style>
+    body{font-family:Tahoma,Arial,sans-serif;margin:36px;color:#1b263a;line-height:1.8}
+    header{display:flex;justify-content:space-between;gap:20px;border-bottom:2px solid #d4deeb;padding-bottom:18px}
+    h1{font-size:24px;margin:0}small{color:#666}table{border-collapse:collapse;width:100%;margin-top:30px}
+    th,td{border:1px solid #d3dae6;padding:12px;text-align:right}th{background:#f4f6fa}
+    .total{margin-top:22px;text-align:left;font-weight:bold}.no-tax{margin-top:30px;font-size:12px;color:#666}
+    button{border:0;border-radius:8px;background:#245eab;color:white;padding:10px 20px;cursor:pointer}
+    @media print{button{display:none}body{margin:20px}}
+    </style></head><body><button onclick="window.print()">چاپ فاکتور</button>
+    <header><div><h1>فاکتور فروش داخلی</h1><strong>'''+safe(company.name)+'''</strong>
+    <p>'''+safe(company.address)+'''</p></div><div><div>شماره: '''+safe(inv.number)+'''
+    </div><small>تاریخ: '''+safe(inv.created_at.strftime('%Y-%m-%d'))+'''</small></div></header>
+    <p>خریدار: <strong>'''+safe(inv.customer_name)+'''</strong></p>
+    <p>نشانی: '''+safe(inv.customer_address)+'''</p>
+    <table><thead><tr><th>SKU</th><th>کالا</th><th>تعداد</th><th>قیمت واحد</th><th>مبلغ</th></tr></thead>
+    <tbody>'''+table_rows+'''</tbody></table>
+    <div class="total">جمع ردیف‌ها: '''+formatted(inv.subtotal)+'''<br>
+    تخفیف: '''+formatted(inv.discount)+'''<br>مبلغ نهایی: '''+formatted(inv.total)+'''</div>
+    <div class="no-tax">این سند فاکتور داخلی فروشگاه است و فاکتور رسمی یا دارای تأییدیه سازمان امور مالیاتی نیست.</div>
+    </body></html>'''
+    return HTMLResponse(html_doc)
 
 @app.post('/api/payments')
 def record_payment(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):

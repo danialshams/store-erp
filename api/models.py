@@ -180,6 +180,32 @@ class SalesLine(Entity,Base):
     cost_snapshot: Mapped[int]=mapped_column(BigInteger,default=0)
     __table_args__=(CheckConstraint('quantity > 0 AND price >= 0 AND returned >= 0 AND returned <= quantity'),)
 
+
+class Invoice(Entity,Base):
+    """Internal immutable sales invoice snapshot; not a government tax invoice."""
+    __tablename__='invoices'
+    order_id: Mapped[str]=mapped_column(String(36),ForeignKey('sales_orders.id'),nullable=False)
+    number: Mapped[str]=mapped_column(String(48),nullable=False)
+    customer_name: Mapped[str]=mapped_column(String(220),nullable=False,default='')
+    customer_address: Mapped[str]=mapped_column(Text,nullable=False,default='')
+    subtotal: Mapped[int]=mapped_column(BigInteger,nullable=False)
+    discount: Mapped[int]=mapped_column(BigInteger,nullable=False,default=0)
+    total: Mapped[int]=mapped_column(BigInteger,nullable=False)
+    issuer_id: Mapped[str]=mapped_column(String(36),ForeignKey('users.id'),nullable=False)
+    __table_args__=(UniqueConstraint('tenant_id','order_id'),
+                    UniqueConstraint('tenant_id','number'),
+                    CheckConstraint('subtotal >= 0 AND discount >= 0 AND total >= 0'))
+
+class InvoiceLine(Entity,Base):
+    __tablename__='invoice_lines'
+    invoice_id: Mapped[str]=mapped_column(String(36),ForeignKey('invoices.id'),nullable=False)
+    variant_id: Mapped[str]=mapped_column(String(36),ForeignKey('variants.id'),nullable=False)
+    sku_snapshot: Mapped[str]=mapped_column(String(100),nullable=False)
+    name_snapshot: Mapped[str]=mapped_column(String(250),nullable=False)
+    quantity: Mapped[int]=mapped_column(Integer,nullable=False)
+    price: Mapped[int]=mapped_column(BigInteger,nullable=False)
+    __table_args__=(CheckConstraint('quantity > 0 AND price >= 0'),)
+
 class Payment(Entity,Base):
     __tablename__='payments'
     order_id: Mapped[str|None]=mapped_column(String(36),ForeignKey('sales_orders.id'))

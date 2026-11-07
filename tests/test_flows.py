@@ -187,3 +187,34 @@ def test_refund_and_vendor_reimbursement_settlement():
     create_user(stranger,'settlement-stranger')
     assert stranger.get('/api/returns/'+ret['id']+'/settlement').status_code==404
     assert stranger.post('/api/returns/'+ret['id']+'/settle',json=p).status_code==404
+
+
+def test_internal_invoice_snapshot_print_and_tenant_scope():
+    client=TestClient(app)
+    create_user(client,'invoice-owner')
+    wh=client.get('/api/data/warehouses').json()['items'][0]
+    product=create(client,'products',name='کالای فاکتور')
+    var=create(client,'variants',product_id=product['id'],name='بسته ۱',sku='INV-SKU-1',purchase_cost=200,retail_price=800)
+    assert client.post('/api/stock/adjust',json={'warehouse_id':wh['id'],'variant_id':var['id'],'delta':4,'reason':'opening'}).status_code==200
+    draft=client.post('/api/sales',json={'warehouse_id':wh['id'],
+           'items':[{'variant_id':var['id'],'quantity':2}], 'discount':100}).json()
+    assert client.post('/api/invoices',json={'order_id':draft['id']}).status_code==409
+    assert client.post('/api/sales/'+draft['id']+'/confirm').status_code==200
+    issued=client.post('/api/invoices',json={'order_id':draft['id']})
+    assert issued.status_code==200,issued.text
+    inv=issued.json()['invoice']
+    assert inv['total']==1500 and inv['discount']==100 and inv['subtotal']==1600
+    assert client.post('/api/invoices',json={'order_id':draft['id']}).json()['duplicate']==True
+    result=client.get('/api/invoices/'+inv['id'])
+    assert result.status_code==200
+    assert result.json()['items'][0]['sku_snapshot']=='INV-SKU-1'
+    assert client.patch('/api/data/variants/'+var['id'],json={'name':'نام تازه','retail_price':900}).status_code==200
+    immutable=client.get('/api/invoices/'+inv['id']).json()['items'][0]
+    assert immutable['name_snapshot']=='بسته ۱' and immutable['price']==800
+    printable=client.get('/api/invoices/'+inv['id']+'/print')
+    assert printable.status_code==200 and 'INV-SKU-1' in printable.text
+    assert 'فاکتور رسمی' in printable.text
+    stranger=TestClient(app)
+    create_user(stranger,'invoice-stranger')
+    assert stranger.get('/api/invoices/'+inv['id']).status_code==404
+    assert stranger.get('/api/invoices/'+inv['id']+'/print').status_code==404

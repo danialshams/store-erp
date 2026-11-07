@@ -13,7 +13,7 @@ const NAV=[
  ['نمای کلی',[['dashboard','داشبورد','grid'],['notifications','اعلان‌ها','bell']]],
  ['کالا و موجودی',[['products','کالاها','box'],['variants','تنوع و قیمت','layers'],['categories','دسته‌بندی‌ها','tag'],['warehouses','انبارها','warehouse'],['stocks','موجودی کالا','box'],['movements','گردش انبار','swap'],['cycle-count','انبارگردانی','check'],['transfers','انتقال بین انبارها','swap']]],
  ['خرید و فروش',[['suppliers','تأمین‌کنندگان','truck'],['purchases','سفارش‌های خرید','cart'],['customers','مشتریان','users'],['sales','فروش و سفارش‌ها','cart'],['returns','مرجوعی‌ها','returns'],['shipments','ارسال و رهگیری','truck']]],
- ['امور مالی',[['payments','پرداخت‌ها','coins'],['cash-accounts','حساب‌ها','card'],['account-entries','گردش حساب‌ها','file'],['price-lists','لیست‌های قیمت','tag'],['price-items','قیمت‌های اختصاصی','tag'],['tax-rates','مالیات‌ها','file'],['reports','گزارش‌ها','chart']]],
+ ['امور مالی',[['invoices','فاکتورهای فروش','file'],['payments','پرداخت‌ها','coins'],['cash-accounts','حساب‌ها','card'],['account-entries','گردش حساب‌ها','file'],['price-lists','لیست‌های قیمت','tag'],['price-items','قیمت‌های اختصاصی','tag'],['tax-rates','مالیات‌ها','file'],['reports','گزارش‌ها','chart']]],
  ['مدیریت',[['team','کاربران و دسترسی','users'],['settings','تنظیمات کسب‌وکار','settings'],['audit','تاریخچه عملیات','clock']]]
 ];
 const LABELS={id:'شناسه',name:'نام',sku:'کد کالا',code:'کد انبار',barcode:'بارکد',unit:'واحد',description:'توضیحات',category_id:'دسته‌بندی',product_id:'کالا',warehouse_id:'انبار',variant_id:'تنوع کالا',supplier_id:'تأمین‌کننده',customer_id:'مشتری',group_name:'گروه',price:'قیمت',purchase_cost:'بهای خرید',retail_price:'قیمت فروش',wholesale_price:'قیمت عمده',low_stock:'حد هشدار',quantity:'تعداد',reserved:'رزروشده',delta:'تغییر',number:'شماره',status:'وضعیت',total:'مبلغ کل',paid:'پرداخت‌شده',discount:'تخفیف',channel:'کانال فروش',phone:'تلفن',email:'ایمیل',address:'نشانی',notes:'توضیحات',active:'فعال',archived:'آرشیو',read:'خوانده شده',amount:'مبلغ',method:'روش',reference_id:'مرجع',created_at:'تاریخ',carrier:'شرکت حمل',tracking_number:'کد رهگیری',role:'نقش',opening_balance:'موجودی اولیه',percentage:'درصد',title:'عنوان',body:'متن',category:'نوع',reason:'علت',source_id:'انبار مبدأ',destination_id:'انبار مقصد',direction:'جهت',restock:'بازگشت به موجودی',expiry_date:'تاریخ انقضا',lot:'سری ساخت',order_id:'سفارش',purchase_id:'خرید',list_id:'لیست قیمت',actor_id:'کاربر',entity:'موجودیت',action:'عملیات',credit_limit:'سقف اعتبار',track_batch:'ردیابی بچ',track_serial:'ردیابی سریال',image_url:'آدرس تصویر'};
@@ -103,6 +103,7 @@ async function loadView(){
  main.innerHTML='<div class="boot" style="min-height:250px"><span class="loader"></span><span>در حال دریافت اطلاعات...</span></div>';
  try{
    if(state.view==='dashboard')await renderDashboard();
+   else if(state.view==='invoices')await renderInvoices();
    else if(state.view==='reports')await renderReports();
    else if(state.view==='cycle-count')await renderCycleCount();
    else if(state.view==='settings')await renderSettings();
@@ -315,6 +316,38 @@ async function openReturn(kind,id){
  },{save:'ثبت مرجوعی'});
 }
 const REPORT_TYPES=[['sales','عملکرد فروش'],['inventory','ارزش موجودی'],['margins','حاشیه سود'],['receivables','مطالبات'],['payables','بدهی خرید']];
+async function renderInvoices(){
+ const result=await api('invoices?page='+state.page+'&limit=25');
+ const btn=(roleCan('sales')||roleCan('cash-accounts'))?
+   `<button class="btn btn-primary" id="issue-invoice">صدور فاکتور جدید ${icon('plus',17)}</button>`:'';
+ const items=result.items.map(inv=>`<tr><td><strong>${esc(inv.number)}</strong></td>
+ <td>${esc(inv.customer_name)}</td><td>${dateFa(inv.created_at)}</td>
+ <td>${money(inv.total)}</td><td><a class="btn btn-small btn-outline" href="/api/invoices/${encodeURIComponent(inv.id)}/print" target="_blank" rel="noopener noreferrer">چاپ ${icon('file',14)}</a></td></tr>`).join('');
+ const cards=result.items.map(inv=>`<div class="mobile-card"><div class="between"><strong>${esc(inv.number)}</strong><span>${money(inv.total)}</span></div>
+ <div class="mobile-fields"><div><label>مشتری</label>${esc(inv.customer_name)}</div><div><label>تاریخ</label>${dateFa(inv.created_at)}</div></div>
+ <div class="row"><a class="btn btn-small btn-outline" href="/api/invoices/${encodeURIComponent(inv.id)}/print" target="_blank" rel="noopener noreferrer">چاپ فاکتور ${icon('file',14)}</a></div></div>`).join('');
+ $('#page-content').innerHTML=`${head('فاکتورهای فروش','فاکتورهای داخلی با نسخه ثابت اطلاعات کالا و مبلغ',btn)}
+ <div class="panel"><div class="notice" style="margin:16px">این بخش فاکتور داخلی است، نه فاکتور رسمی تأییدشده مالیاتی.</div>
+ ${result.items.length?`<div class="table-wrap"><table class="table"><thead><tr><th>شماره</th><th>مشتری</th><th>تاریخ</th><th>مبلغ</th><th>چاپ</th></tr></thead>
+ <tbody>${items}</tbody></table></div><div class="mobile-cards">${cards}</div>`:'<div class="empty">تاکنون فاکتوری صادر نشده است.</div>'}
+ <div class="pagination"><span>${fa(result.total)} فاکتور · صفحه ${fa(state.page)}</span>
+ <div class="row"><button class="btn btn-small btn-outline" id="invoice-prev" ${state.page<=1?'disabled':''}>قبلی</button>
+ <button class="btn btn-small btn-outline" id="invoice-next" ${state.page*25>=result.total?'disabled':''}>بعدی</button></div></div></div>`;
+}
+async function openIssueInvoice(){
+ const sales=await api('data/sales?limit=100');
+ const eligible=sales.items.filter(x=>['confirmed','fulfilled'].includes(x.status));
+ if(!eligible.length)return notify('ابتدا یک سفارش فروش را تأیید کنید',true);
+ const content=`<div class="field"><label>سفارش فروش</label>${selectField('order_id',eligible.map(x=>({id:x.id,label:x.number+' — '+money(x.total)})))}</div>
+ <p class="notice">پس از صدور، اطلاعات فروش و قیمت اقلام در فاکتور ثابت می‌مانند. برای هر فروش تنها یک فاکتور صادر می‌شود.</p>
+ <p class="hint">این سند داخلی است و برای صدور فاکتور رسمی مالیاتی باید الزامات قانونی جداگانه اجرا شوند.</p>`;
+ showModal('صدور فاکتور داخلی',content,async form=>{
+  const id=new FormData(form).get('order_id');
+  const result=await api('invoices',{method:'POST',body:{order_id:id}});
+  closeModal();notify(result.duplicate?'این فروش قبلاً فاکتور داشته است':'فاکتور صادر شد');renderInvoices();
+ },{save:'صدور فاکتور'});
+}
+
 async function renderReports(){
  const report=await api('reports?type='+state.report);
  state.data.reportRows=report.rows;
@@ -374,6 +407,9 @@ root.addEventListener('click',async e=>{
   if(state.view==='purchases'||state.view==='sales')return openDocument(state.view);
   return openGeneric(state.view);
  }
+ if(btn.id==='issue-invoice')return openIssueInvoice();
+ if(btn.id==='invoice-prev'){state.page=Math.max(1,state.page-1);return renderInvoices()}
+ if(btn.id==='invoice-next'){state.page++;return renderInvoices()}
  if(btn.id==='adjust-stock')return openAdjustment();
  if(btn.id==='count-refresh')return renderCycleCount();
  if(btn.id==='count-prev'){state.page=Math.max(1,state.page-1);return renderCycleCount()}
@@ -461,7 +497,7 @@ modals.addEventListener('submit',async e=>{
 });
 window.addEventListener('keydown',e=>{if(e.key==='Escape'&&modals.innerHTML)closeModal()});
 async function boot(){
- try{state.me=await api('auth/me');await maybeAcceptInvite();renderShell();const hash=location.hash.slice(1);state.view=(hash==='dashboard'||META[hash]||['reports','settings','team','cycle-count'].includes(hash))?hash:'dashboard';setView(state.view)}
+ try{state.me=await api('auth/me');await maybeAcceptInvite();renderShell();const hash=location.hash.slice(1);state.view=(hash==='dashboard'||META[hash]||['reports','settings','team','cycle-count','invoices'].includes(hash))?hash:'dashboard';setView(state.view)}
  catch{renderAuth()}
 }
 boot();
