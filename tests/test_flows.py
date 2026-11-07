@@ -218,3 +218,25 @@ def test_internal_invoice_snapshot_print_and_tenant_scope():
     create_user(stranger,'invoice-stranger')
     assert stranger.get('/api/invoices/'+inv['id']).status_code==404
     assert stranger.get('/api/invoices/'+inv['id']+'/print').status_code==404
+
+
+def test_fetch_metadata_rejects_cross_site_mutations_without_origin():
+    client=TestClient(app, raise_server_exceptions=False)
+    rejected=client.post('/api/auth/login', json={'email':'nobody@example.com','password':'wrong'},
+                         headers={'Sec-Fetch-Site':'cross-site'})
+    assert rejected.status_code==403, rejected.text
+    assert rejected.json()['detail']=='درخواست از مبدأ غیرمجاز'
+    # Same-origin browser requests still reach normal authentication.
+    allowed=client.post('/api/auth/login', json={'email':'nobody@example.com','password':'wrong'},
+                        headers={'Sec-Fetch-Site':'same-origin'})
+    assert allowed.status_code==401, allowed.text
+
+
+def test_origin_scheme_must_match_request_scheme():
+    client=TestClient(app, base_url='https://erp.example', raise_server_exceptions=False)
+    rejected=client.post('/api/auth/login', json={'email':'nobody@example.com','password':'wrong'},
+                         headers={'Origin':'http://erp.example'})
+    assert rejected.status_code==403, rejected.text
+    allowed=client.post('/api/auth/login', json={'email':'nobody@example.com','password':'wrong'},
+                        headers={'Origin':'https://erp.example'})
+    assert allowed.status_code==401, allowed.text
