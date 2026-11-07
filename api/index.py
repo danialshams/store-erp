@@ -1606,6 +1606,54 @@ def serial_register(body:dict=Body(...),db:Session=Depends(db_session),
     except IntegrityError:db.rollback();raise HTTPException(409,'شماره سریال تکراری است')
     return {'ok':True,'registered':len(requested)}
 
+@app.get('/api/stock/fefo-availability/{variant_id}')
+def fefo_availability(variant_id:str,warehouse_id:str,
+                      quantity:int=Query(1,ge=1,le=1000000),
+                      db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    """Read-only FEFO allocation plan; never reserves or mutates inventory.
+
+    An allocation is advisory: fulfillment revalidates under transaction locks.
+    Expired batches are excluded from sale, while undated batches rank last.
+    """
+    tid=ctx['tenant']
+    variant=tenant_object(db,Variant,tid,variant_id)
+    tenant_object(db,Warehouse,tid,warehouse_id)
+    if not variant.track_batch:
+        raise HTTPException(422,'این کالا ردیابی بچ ندارد')
+    today=date.today()
+    lots=db.query(StockBatch).filter_by(
+        tenant_id=tid,warehouse_id=warehouse_id,variant_id=variant_id).all()
+    eligible=sorted((lot for lot in lots if lot.quantity>0 and
+                     (lot.expiry_date is None or lot.expiry_date>=today)),
+                    key=lambda lot:(lot.expiry_date is None,
+                                    lot.expiry_date or date.max,lot.created_at,lot.id))
+    valid_total=sum(lot.quantity for lot in eligible)
+    expired_total=sum(lot.quantity for lot in lots if lot.quantity>0 and
+                      lot.expiry_date is not None and lot.expiry_date<today)
+    stock=db.query(Stock).filter_by(tenant_id=tid,warehouse_id=warehouse_id,
+                                   variant_id=variant_id).first()
+    reserved=stock.reserved if stock else 0
+    # A reservation is not tied to a batch; subtract the reserved aggregate
+    # conservatively instead of promising stock already committed elsewhere.
+    available=max(0,valid_total-reserved)
+    remaining=min(quantity,available)
+    allocation=[]
+    for lot in eligible:
+        take=min(remaining,lot.quantity)
+        if take:
+            allocation.append({'batch_id':lot.id,'lot':lot.lot,
+                               'expiry_date':lot.expiry_date.isoformat() if lot.expiry_date else None,
+                               'quantity':take})
+            remaining-=take
+        if not remaining:break
+    return {'variant_id':variant_id,'warehouse_id':warehouse_id,
+            'requested':quantity,'allocatable':sum(x['quantity'] for x in allocation),
+            'available':available,'reserved':reserved,
+            'expired_quantity':expired_total,
+            'sufficient':available>=quantity,'allocation':allocation,
+            'advisory':True}
+
+
 @app.get('/api/stock/traceability/{variant_id}')
 def traceability(variant_id:str,warehouse_id:str,
                  db:Session=Depends(db_session),ctx:dict=Depends(principal)):
