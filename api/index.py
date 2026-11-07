@@ -1,0 +1,612 @@
+"""Portable Retail ERP: FastAPI / SQLAlchemy / PostgreSQL.
+
+Critical stock mutations are transaction-bound, serialized per stock key,
+permission checked and recorded in an append-only ledger.
+"""
+from __future__ import annotations
+from datetime import date, datetime, timezone, timedelta
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+import os
+from fastapi import FastAPI, Request, HTTPException, Depends, Body, Query
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import select, func, text, or_
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+from .db import Session as DbSession, init_db, engine
+from .models import *
+from .security import issue_token, make_password, verify_password, context, authorized, csrf_guard, ROLES, ALL, CATALOG, WAREHOUSE, SALES, PURCHASE, FINANCE
+
+app=FastAPI(title='ERP فروشگاهی',docs_url='/api/docs',openapi_url='/api/openapi.json',redoc_url=None)
+PUBLIC=Path(__file__).resolve().parent.parent/'public'
+app.mount('/assets',StaticFiles(directory=str(PUBLIC)),name='assets')
+
+@app.middleware('http')
+async def safety_middleware(request:Request,call_next):
+    if request.url.path.startswith('/api/'):
+        csrf_guard(request)
+    response=await call_next(request)
+    response.headers['X-Content-Type-Options']='nosniff'
+    response.headers['X-Frame-Options']='DENY'
+    response.headers['Referrer-Policy']='strict-origin-when-cross-origin'
+    response.headers['Cache-Control']='no-store'
+    return response
+
+@app.get('/')
+def index(): return FileResponse(PUBLIC/'index.html')
+@app.get('/app')
+def home(): return FileResponse(PUBLIC/'index.html')
+
+# Local development creates SQLite tables. Deployed PostgreSQL must be migrated separately.
+if engine.dialect.name=='sqlite' and not os.environ.get('VERCEL'):
+    init_db()
+
+def db_session():
+    db=DbSession()
+    try: yield db
+    finally: db.close()
+
+def principal(req:Request,db:Session=Depends(db_session)):
+    return context(req,db)
+
+def tenant_object(db,model,tenant_id,object_id,lock=False):
+    q=db.query(model).filter_by(id=object_id,tenant_id=tenant_id)
+    if lock:q=q.with_for_update()
+    item=q.first()
+    if not item:raise HTTPException(404,'رکورد پیدا نشد')
+    return item
+
+def as_dict(item):
+    return {c.name:(v.isoformat() if isinstance((v:=getattr(item,c.name)),(datetime,date)) else v) for c in item.__table__.columns}
+
+def audit(db,ctx,action,entity,item=None,details=None):
+    db.add(Audit(tenant_id=ctx['tenant'],actor_id=ctx['user'].id,action=action,entity=entity,entity_id=item,details=details or {}))
+
+def notification(db,tid,title,body,category):
+    db.add(Notification(tenant_id=tid,title=title,body=body,category=category))
+
+def amount(value,name='مبلغ'):
+    if type(value) is not int or value < 0 or value > 9_000_000_000_000_000:
+        raise HTTPException(422,f'{name} باید عدد صحیح غیرمنفی باشد')
+    return value
+
+def positive(value,name='تعداد'):
+    if type(value) is not int or value<=0 or value>1_000_000:
+        raise HTTPException(422,f'{name} باید عدد صحیح مثبت باشد')
+    return value
+
+def require_string(value,label='مقدار',maxlen=200):
+    if not isinstance(value,str) or not 0 < len(value.strip()) <= maxlen:
+        raise HTTPException(422,f'{label} الزامی است')
+    return value.strip()
+
+def secure_cookie(response,token):
+    response.set_cookie('erp_session',token,httponly=True,secure=(os.environ.get('COOKIE_SECURE','true' if os.environ.get('VERCEL') else 'false').lower()=='true'),samesite='lax',max_age=604800,path='/')
+
+def account_info(db,ctx):
+    return {'name':ctx['user'].name,'email':ctx['user'].email,'user_id':ctx['user'].id,'tenant_id':ctx['tenant'],'tenant':db.get(Tenant,ctx['tenant']).name,'role':ctx['role']}
+
+@app.post('/api/auth/register')
+def register(body:dict=Body(...),db:Session=Depends(db_session)):
+    name=require_string(body.get('name'),'نام',120)
+    company=require_string(body.get('company'),'نام کسب‌وکار',200)
+    email=require_string(body.get('email'),'ایمیل',254).lower()
+    password=body.get('password')
+    if not isinstance(password,str) or len(password)<12 or len(password)>200:raise HTTPException(422,'رمز عبور باید حداقل ۱۲ نویسه باشد')
+    if db.query(User).filter_by(email=email).first():raise HTTPException(409,'ایمیل قبلاً ثبت شده است')
+    try:
+        user=User(name=name,email=email,password_hash=make_password(password))
+        tenant=Tenant(name=company)
+        db.add_all([user,tenant]);db.flush()
+        db.add(Member(tenant_id=tenant.id,user_id=user.id,role='owner'))
+        db.add(Warehouse(tenant_id=tenant.id,name='انبار اصلی',code='MAIN'))
+        db.add(CashAccount(tenant_id=tenant.id,name='صندوق اصلی',type='cash'))
+        db.commit()
+    except IntegrityError:db.rollback();raise HTTPException(409,'ایمیل تکراری است')
+    response=JSONResponse({'ok':True,'tenant_id':tenant.id})
+    secure_cookie(response,issue_token(user.id,tenant.id))
+    return response
+
+@app.post('/api/auth/login')
+def login(body:dict=Body(...),db:Session=Depends(db_session)):
+    email=str(body.get('email','')).lower().strip()
+    password=str(body.get('password',''))
+    user=db.query(User).filter_by(email=email,active=True).first()
+    # Verify fixed fake digest on unknown user for roughly equal work.
+    if not user or not verify_password(password,user.password_hash):
+        if not user:verify_password(password,'pbkdf2_sha256$600000$'+'00'*16+'$'+'00'*32)
+        raise HTTPException(401,'ایمیل یا رمز عبور اشتباه است')
+    membership=db.query(Member).filter_by(user_id=user.id,active=True).first()
+    if not membership:raise HTTPException(403,'عضویت فعالی ندارید')
+    response=JSONResponse({'ok':True})
+    secure_cookie(response,issue_token(user.id,membership.tenant_id))
+    return response
+
+@app.post('/api/auth/logout')
+def logout():
+    response=JSONResponse({'ok':True})
+    response.delete_cookie('erp_session',path='/')
+    return response
+
+@app.get('/api/auth/me')
+def me(db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    return account_info(db,ctx)
+
+# Generic resources are direct editable reference data only; orders, balances and ledger
+# are expressly absent from the generic mutation map.
+SPEC={
+ 'categories':(Category,CATALOG,['name','parent_id'],['name']),
+ 'products':(Product,CATALOG,['name','category_id','description','image_url','active'],['name','description']),
+ 'variants':(Variant,CATALOG,['product_id','name','sku','barcode','unit','purchase_cost','retail_price','wholesale_price','low_stock','track_batch','track_serial','active'],['sku','name','barcode']),
+ 'warehouses':(Warehouse,WAREHOUSE,['name','code','address','active'],['name','code']),
+ 'suppliers':(Supplier,PURCHASE,['name','phone','email','address','notes'],['name','phone']),
+ 'customers':(Customer,SALES|FINANCE,['name','phone','email','address','group_name','credit_limit'],['name','phone']),
+ 'price-lists':(PriceList,SALES,['name','group_name','active'],['name']),
+ 'price-items':(PriceItem,SALES,['list_id','variant_id','price'],[]),
+ 'cash-accounts':(CashAccount,FINANCE,['name','type','opening_balance'],['name']),
+ 'tax-rates':(Tax,FINANCE,['name','percentage'],['name']),
+ 'shipments':(Shipment,SALES,['order_id','carrier','tracking_number','status','address'],['tracking_number','carrier']),
+}
+READABLE={
+ **{k:(v[0],ALL,v[3]) for k,v in SPEC.items()},
+ 'stocks':(Stock,ALL,[]),'movements':(Movement,ALL,['reason']),
+ 'batches':(StockBatch,ALL,['lot']), 'transfers':(Transfer,ALL,['status']),
+ 'purchases':(PurchaseOrder,ALL,['number','status']),
+ 'purchase-lines':(PurchaseLine,ALL,[]),'sales':(SalesOrder,ALL,['number','status']),
+ 'sales-lines':(SalesLine,ALL,[]),'payments':(Payment,FINANCE|SALES,['method']),
+ 'returns':(Return,ALL,['direction']), 'account-entries':(AccountEntry,FINANCE,[]),
+ 'notifications':(Notification,ALL,['title']), 'audit':(Audit,{'owner','admin'},['action','entity'])
+}
+REFS={'parent_id':Category,'category_id':Category,'product_id':Product,'warehouse_id':Warehouse,
+      'supplier_id':Supplier,'customer_id':Customer,'variant_id':Variant,'list_id':PriceList,'order_id':SalesOrder,'parent_id':Category}
+FIELDS_NONNEGATIVE={'purchase_cost','retail_price','wholesale_price','low_stock','credit_limit','price','opening_balance','percentage'}
+
+def checked_fields(db,ctx,model,fields,body):
+    if not isinstance(body,dict) or not body:raise HTTPException(422,'اطلاعات موردنیاز ارسال نشده است')
+    if set(body)-set(fields):raise HTTPException(422,'فیلد نامعتبر: '+','.join(set(body)-set(fields)))
+    for k,v in body.items():
+        if k in REFS and v is not None:
+            tenant_object(db,REFS[k],ctx['tenant'],v)
+        if k in FIELDS_NONNEGATIVE: amount(v,k)
+        if k=='percentage' and v>100:raise HTTPException(422,'درصد نامعتبر')
+        if k in {'name','sku','code'}:require_string(v,k,250)
+        if k=='image_url' and v is not None and (not isinstance(v,str) or len(v)>2048 or not v.startswith('https://')):
+            raise HTTPException(422,'آدرس تصویر باید HTTPS باشد')
+        if k=='status' and model is Shipment and v not in ['pending','shipped','delivered','returned']:
+            raise HTTPException(422,'وضعیت نامعتبر')
+    return body
+
+@app.get('/api/data/{resource}')
+def list_resource(resource:str,search:str='',page:int=Query(1,ge=1,le=100000),limit:int=Query(30,ge=1,le=100),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    if resource not in READABLE:raise HTTPException(404,'بخش موجود نیست')
+    model,roles,search_cols=READABLE[resource]
+    authorized(ctx,roles)
+    q=db.query(model).filter_by(tenant_id=ctx['tenant'])
+    if resource=='products': q=q.filter_by(archived=False)
+    if search and search_cols:
+        q=q.filter(or_(*[getattr(model,col).ilike(f'%{search[:100]}%') for col in search_cols]))
+    total=q.count()
+    records=q.order_by(model.created_at.desc()).offset((page-1)*limit).limit(limit).all()
+    return {'items':[as_dict(x) for x in records],'total':total,'page':page,'limit':limit}
+
+@app.post('/api/data/{resource}')
+def create_resource(resource:str,body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    if resource not in SPEC: raise HTTPException(405,'این عملیات فقط از مسیر اختصاصی مجاز است')
+    model,roles,fields,_=SPEC[resource]
+    authorized(ctx,roles)
+    vals=checked_fields(db,ctx,model,fields,body)
+    if resource=='shipments':
+        linked=tenant_object(db,SalesOrder,ctx['tenant'],vals.get('order_id'))
+        if linked.status!='fulfilled':raise HTTPException(409,'ارسال فقط برای سفارش تحویل‌شده قابل ثبت است')
+    try:
+        obj=model(tenant_id=ctx['tenant'],**vals)
+        db.add(obj);db.flush()
+        audit(db,ctx,'create',resource,obj.id)
+        db.commit()
+        return as_dict(obj)
+    except IntegrityError:db.rollback();raise HTTPException(409,'مقادیر تکراری یا ارتباط نامعتبر است')
+
+@app.patch('/api/data/{resource}/{item_id}')
+def update_resource(resource:str,item_id:str,body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    if resource not in SPEC:raise HTTPException(405,'ویرایش از این مسیر مجاز نیست')
+    model,roles,fields,_=SPEC[resource]
+    authorized(ctx,roles)
+    obj=tenant_object(db,model,ctx['tenant'],item_id,lock=True)
+    vals=checked_fields(db,ctx,model,fields,body)
+    if resource=='products' and 'archived' in vals:raise HTTPException(422,'آرشیو از مسیر حذف انجام می‌شود')
+    if resource=='shipments' and 'order_id' in vals:
+        linked=tenant_object(db,SalesOrder,ctx['tenant'],vals['order_id'])
+        if linked.status!='fulfilled':raise HTTPException(409,'سفارش قابل ارسال نیست')
+    if resource=='shipments' and obj.status=='delivered' and 'status' in vals and vals['status']!='delivered':
+        raise HTTPException(409,'ارسال تحویل‌شده قابل بازگشت نیست')
+    for k,v in vals.items():setattr(obj,k,v)
+    audit(db,ctx,'update',resource,obj.id)
+    try:db.commit()
+    except IntegrityError:db.rollback();raise HTTPException(409,'مقادیر نامعتبر یا تکراری')
+    return as_dict(obj)
+
+@app.delete('/api/data/{resource}/{item_id}')
+def delete_resource(resource:str,item_id:str,db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    if resource not in SPEC:raise HTTPException(405,'حذف از این مسیر مجاز نیست')
+    model,roles,_,_=SPEC[resource]
+    authorized(ctx,roles)
+    obj=tenant_object(db,model,ctx['tenant'],item_id,lock=True)
+    if resource=='products':
+        obj.archived=True;obj.active=False
+    elif resource=='variants':
+        obj.active=False
+    else:
+        db.delete(obj)
+    audit(db,ctx,'archive' if resource in ('products','variants') else 'delete',resource,item_id)
+    try:db.commit()
+    except IntegrityError:db.rollback();raise HTTPException(409,'این رکورد در اسناد دیگر استفاده شده و امکان حذف آن نیست')
+    return {'ok':True}
+
+# Inventory changes: only this function writes stocks and movements.
+# Per-key transaction advisory lock prevents races even when no balance row exists yet.
+def _stock(db:Session,ctx,warehouse_id,variant_id,delta,reason,ref=None,note=None,release_reserved=0,reserve=0):
+    tid=ctx['tenant']
+    tenant_object(db,Warehouse,tid,warehouse_id)
+    tenant_object(db,Variant,tid,variant_id)
+    if db.bind.dialect.name=='postgresql':
+        db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{'key':tid+':'+warehouse_id+':'+variant_id})
+    stock=db.query(Stock).filter_by(tenant_id=tid,warehouse_id=warehouse_id,variant_id=variant_id).with_for_update().first()
+    if not stock:
+        stock=Stock(tenant_id=tid,warehouse_id=warehouse_id,variant_id=variant_id,quantity=0,reserved=0)
+        db.add(stock);db.flush()
+    next_qty=stock.quantity+delta
+    next_reserved=stock.reserved-release_reserved+reserve
+    if next_reserved<0 or next_qty<0 or next_qty<next_reserved:raise HTTPException(409,'موجودی آزاد کافی نیست')
+    stock.quantity=next_qty;stock.reserved=next_reserved
+    if delta:
+        db.add(Movement(tenant_id=tid,warehouse_id=warehouse_id,variant_id=variant_id,delta=delta,reason=reason,reference_id=ref,note=note,actor_id=ctx['user'].id))
+    return stock
+
+@app.post('/api/stock/adjust')
+def adjust(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,WAREHOUSE)
+    delta=body.get('delta')
+    if type(delta) is not int or delta==0 or abs(delta)>1_000_000:raise HTTPException(422,'تغییر موجودی نامعتبر')
+    reason=require_string(body.get('reason'),'دلیل',100)
+    if reason not in ['opening','correction','damage','loss','cycle_count']:raise HTTPException(422,'دلیل معتبر نیست')
+    stock=_stock(db,ctx,body.get('warehouse_id'),body.get('variant_id'),delta,reason,note=body.get('note'))
+    audit(db,ctx,'adjust_stock','stocks',stock.id,{'delta':delta,'reason':reason})
+    db.commit()
+    return as_dict(stock)
+
+@app.post('/api/transfers')
+def create_transfer(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,WAREHOUSE)
+    qty=positive(body.get('quantity'))
+    source=body.get('source_id');dest=body.get('destination_id');vid=body.get('variant_id')
+    if source==dest:raise HTTPException(422,'انبار مبدأ و مقصد باید متفاوت باشند')
+    for wid in (source,dest):tenant_object(db,Warehouse,ctx['tenant'],wid)
+    tenant_object(db,Variant,ctx['tenant'],vid)
+    obj=Transfer(tenant_id=ctx['tenant'],source_id=source,destination_id=dest,variant_id=vid,quantity=qty,actor_id=ctx['user'].id)
+    db.add(obj);db.flush();audit(db,ctx,'create','transfers',obj.id);db.commit()
+    return as_dict(obj)
+
+@app.post('/api/transfers/{transfer_id}/{action}')
+def transfer_action(transfer_id:str,action:str,db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,WAREHOUSE)
+    obj=tenant_object(db,Transfer,ctx['tenant'],transfer_id,lock=True)
+    if action=='ship' and obj.status=='draft':
+        _stock(db,ctx,obj.source_id,obj.variant_id,-obj.quantity,'transfer_ship',obj.id)
+        obj.status='shipped'
+    elif action=='receive' and obj.status=='shipped':
+        _stock(db,ctx,obj.destination_id,obj.variant_id,obj.quantity,'transfer_receive',obj.id)
+        obj.status='received'
+    elif action=='cancel' and obj.status=='draft':
+        obj.status='cancelled'
+    else:raise HTTPException(409,'این تغییر وضعیت مجاز نیست')
+    audit(db,ctx,action,'transfers',obj.id)
+    db.commit();return as_dict(obj)
+
+def _create_lines(db,tid,items,model,variant_ref,price_key):
+    if not isinstance(items,list) or not items or len(items)>100:raise HTTPException(422,'حداقل یک قلم لازم است')
+    result=[];total=0;seen=set()
+    for data in items:
+        if not isinstance(data,dict):raise HTTPException(422,'قلم نامعتبر')
+        variant=tenant_object(db,Variant,tid,data.get('variant_id'))
+        if variant.id in seen:raise HTTPException(422,'هر کالا را فقط یک‌بار در سند وارد کنید')
+        seen.add(variant.id)
+        if not variant.active:raise HTTPException(409,'تنوع غیرفعال است')
+        qty=positive(data.get('quantity'))
+        unit_price=amount(data.get(price_key,getattr(variant,variant_ref)),price_key)
+        total+=unit_price*qty
+        result.append((variant,qty,unit_price))
+    if total>9_000_000_000_000_000:raise HTTPException(422,'مبلغ از سقف مجاز بیشتر است')
+    return result,total
+
+def _number(prefix):
+    return prefix+'-'+datetime.now(timezone.utc).strftime('%y%m%d')+'-'+uuid4().hex[:9].upper()
+
+@app.post('/api/purchases')
+def create_purchase(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,PURCHASE)
+    tid=ctx['tenant']
+    supplier=tenant_object(db,Supplier,tid,body.get('supplier_id'))
+    warehouse=tenant_object(db,Warehouse,tid,body.get('warehouse_id'))
+    lines,total=_create_lines(db,tid,body.get('items'),PurchaseLine,'purchase_cost','cost')
+    obj=PurchaseOrder(tenant_id=tid,supplier_id=supplier.id,warehouse_id=warehouse.id,number=_number('PO'),total=total)
+    db.add(obj);db.flush()
+    for variant,qty,cost in lines:
+        db.add(PurchaseLine(tenant_id=tid,order_id=obj.id,variant_id=variant.id,quantity=qty,cost=cost))
+    audit(db,ctx,'create','purchases',obj.id);db.commit()
+    return as_dict(obj)
+
+@app.post('/api/purchases/{purchase_id}/receive')
+def receive_purchase(purchase_id:str,body:dict=Body(default={}),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,PURCHASE)
+    order=tenant_object(db,PurchaseOrder,ctx['tenant'],purchase_id,lock=True)
+    key=body.get('idempotency_key')
+    if key:
+        key=require_string(key,'شناسه درخواست',150)
+        prior=db.query(EventKey).filter_by(tenant_id=ctx['tenant'],kind='purchase_receive',key=key).first()
+        if prior:return {'duplicate':True,'order':as_dict(order)}
+    if order.status in ('received','cancelled'):raise HTTPException(409,'سفارش قابل دریافت نیست')
+    lines=db.query(PurchaseLine).filter_by(tenant_id=ctx['tenant'],order_id=order.id).with_for_update().all()
+    provided=body.get('items')
+    if provided is not None and (not isinstance(provided,list) or not provided):raise HTTPException(422,'اقلام نامعتبر')
+    desired={item['line_id']:positive(item['quantity']) for item in provided} if provided else {l.id:l.quantity-l.received for l in lines if l.quantity>l.received}
+    if not desired:raise HTTPException(409,'قلمی برای دریافت وجود ندارد')
+    if set(desired)-{l.id for l in lines}:raise HTTPException(422,'ردیف غیرمجاز')
+    for line in lines:
+        q=desired.get(line.id,0)
+        if q:
+            if q>line.quantity-line.received:raise HTTPException(409,'دریافت بیش از تعداد سفارش')
+            _stock(db,ctx,order.warehouse_id,line.variant_id,q,'purchase_receive',order.id)
+            line.received+=q
+    order.status='received' if all(l.received==l.quantity for l in lines) else 'partial'
+    audit(db,ctx,'receive','purchases',order.id,{'lines':desired})
+    if key:db.add(EventKey(tenant_id=ctx['tenant'],kind='purchase_receive',key=key,reference_id=order.id))
+    try:db.commit()
+    except IntegrityError:db.rollback();raise HTTPException(409,'دریافت تکراری است')
+    return as_dict(order)
+
+@app.post('/api/sales')
+def create_sale(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,SALES)
+    tid=ctx['tenant'];wh=tenant_object(db,Warehouse,tid,body.get('warehouse_id'))
+    cid=body.get('customer_id')
+    if cid:tenant_object(db,Customer,tid,cid)
+    channel=body.get('channel','retail')
+    if channel not in ('retail','wholesale','online','pos'):raise HTTPException(422,'کانال نامعتبر')
+    lines,total=_create_lines(db,tid,body.get('items'),SalesLine,'wholesale_price' if channel=='wholesale' else 'retail_price','price')
+    discount=amount(body.get('discount',0),'تخفیف')
+    if discount>total:raise HTTPException(422,'تخفیف از کل بیشتر است')
+    obj=SalesOrder(tenant_id=tid,customer_id=cid,warehouse_id=wh.id,number=_number('SO'),channel=channel,total=total-discount,discount=discount)
+    db.add(obj);db.flush()
+    for variant,qty,price in lines:
+        db.add(SalesLine(tenant_id=tid,order_id=obj.id,variant_id=variant.id,quantity=qty,price=price,cost_snapshot=variant.purchase_cost))
+    audit(db,ctx,'create','sales',obj.id);db.commit();return as_dict(obj)
+
+@app.post('/api/sales/{sale_id}/{action}')
+def sale_action(sale_id:str,action:str,db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,SALES|WAREHOUSE if action=='fulfill' else SALES)
+    order=tenant_object(db,SalesOrder,ctx['tenant'],sale_id,lock=True)
+    lines=db.query(SalesLine).filter_by(tenant_id=ctx['tenant'],order_id=order.id).all()
+    counts={}
+    for l in lines:counts[l.variant_id]=counts.get(l.variant_id,0)+l.quantity
+    if action=='confirm' and order.status=='draft':
+        for vid,qty in sorted(counts.items()):_stock(db,ctx,order.warehouse_id,vid,0,'reserve',order.id,reserve=qty)
+        order.status='confirmed'
+    elif action=='fulfill' and order.status=='confirmed':
+        for vid,qty in sorted(counts.items()):_stock(db,ctx,order.warehouse_id,vid,-qty,'sale_fulfill',order.id,release_reserved=qty)
+        order.status='fulfilled'
+        notification(db,ctx['tenant'],'سفارش آماده شد',f'سفارش {order.number} از انبار خارج شد.','sale')
+    elif action=='cancel' and order.status in ('draft','confirmed'):
+        if order.paid>0:raise HTTPException(409,'سفارش دارای پرداخت است؛ ابتدا استرداد را ثبت کنید')
+        if order.status=='confirmed':
+            for vid,qty in sorted(counts.items()):_stock(db,ctx,order.warehouse_id,vid,0,'unreserve',order.id,release_reserved=qty)
+        order.status='cancelled'
+    else:raise HTTPException(409,'انتقال وضعیت غیرمجاز است')
+    audit(db,ctx,action,'sales',order.id)
+    db.commit();return as_dict(order)
+
+@app.post('/api/payments')
+def record_payment(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,SALES|FINANCE)
+    tid=ctx['tenant'];key=require_string(body.get('idempotency_key'),'شناسه یکتا',120)
+    existing=db.query(Payment).filter_by(tenant_id=tid,idempotency_key=key).first()
+    if existing:return {'duplicate':True,'payment':as_dict(existing)}
+    v=positive(body.get('amount'),'مبلغ')
+    sale_id=body.get('sale_id');purchase_id=body.get('purchase_id')
+    if bool(sale_id)==bool(purchase_id):raise HTTPException(422,'فقط یک سند فروش یا خرید تعیین کنید')
+    if purchase_id:authorized(ctx,FINANCE)
+    doc=tenant_object(db,SalesOrder if sale_id else PurchaseOrder,tid,sale_id or purchase_id,lock=True)
+    if doc.status=='cancelled':raise HTTPException(409,'سند لغوشده قابل پرداخت نیست')
+    if v>doc.total-doc.paid:raise HTTPException(409,'پرداخت از مانده بیشتر است')
+    method=body.get('method','cash')
+    if method not in ('cash','card','transfer','online'):raise HTTPException(422,'روش پرداخت نامعتبر')
+    obj=Payment(tenant_id=tid,order_id=sale_id,purchase_id=purchase_id,amount=v,method=method,idempotency_key=key,actor_id=ctx['user'].id)
+    db.add(obj);db.flush()
+    doc.paid+=v
+    account_id=body.get('account_id')
+    if account_id:
+        tenant_object(db,CashAccount,tid,account_id)
+        db.add(AccountEntry(tenant_id=tid,account_id=account_id,direction='in' if sale_id else 'out',amount=v,reference=obj.id,note='دریافت سفارش' if sale_id else 'پرداخت خرید'))
+    if sale_id:
+        notification(db,tid,'پرداخت موفق',f'پرداخت {v:,} تومان برای سفارش {doc.number} ثبت شد.','payment')
+    audit(db,ctx,'record','payments',obj.id,{'amount':v})
+    try:db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing=db.query(Payment).filter_by(tenant_id=tid,idempotency_key=key).first()
+        if existing:return {'duplicate':True,'payment':as_dict(existing)}
+        raise HTTPException(409,'پرداخت تکراری یا نامعتبر')
+    return {'duplicate':False,'payment':as_dict(obj)}
+
+@app.post('/api/returns')
+def record_return(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    tid=ctx['tenant'];direction=body.get('direction')
+    authorized(ctx,SALES if direction=='sale' else PURCHASE)
+    if direction not in ('sale','purchase'):raise HTTPException(422,'نوع مرجوعی نامعتبر')
+    key=body.get('idempotency_key')
+    if key:
+        key=require_string(key,'شناسه درخواست',150)
+        previous=db.query(EventKey).filter_by(tenant_id=tid,kind='return',key=key).first()
+        if previous:return {'duplicate':True,'return_id':previous.reference_id}
+    id_=body.get('order_id')
+    doc=tenant_object(db,SalesOrder if direction=='sale' else PurchaseOrder,tid,id_,lock=True)
+    if direction=='sale' and doc.status!='fulfilled':raise HTTPException(409,'فقط فروش تحویل‌شده مرجوع می‌شود')
+    if direction=='purchase' and doc.status not in ('received','partial'):raise HTTPException(409,'این خرید هنوز دریافت نشده است')
+    vid=body.get('variant_id');qty=positive(body.get('quantity'))
+    line_model=SalesLine if direction=='sale' else PurchaseLine
+    line=db.query(line_model).filter_by(tenant_id=tid,order_id=doc.id,variant_id=vid).with_for_update().first()
+    if not line:raise HTTPException(422,'کالا در سند وجود ندارد')
+    if direction=='sale':
+        if qty>line.quantity-line.returned:raise HTTPException(409,'تعداد مرجوعی از فروش بیشتر است')
+        line.returned+=qty
+    else:
+        prior=db.query(func.coalesce(func.sum(Return.quantity),0)).filter_by(tenant_id=tid,purchase_id=doc.id,variant_id=vid,direction='purchase').scalar()
+        if qty>line.received-int(prior):raise HTTPException(409,'مرجوعی از دریافتی بیشتر است')
+    restock=bool(body.get('restock',True))
+    if direction=='purchase':_stock(db,ctx,doc.warehouse_id,vid,-qty,'supplier_return',doc.id)
+    elif restock:_stock(db,ctx,doc.warehouse_id,vid,qty,'customer_return',doc.id)
+    obj=Return(tenant_id=tid,direction=direction,order_id=doc.id if direction=='sale' else None,purchase_id=doc.id if direction=='purchase' else None,variant_id=vid,warehouse_id=doc.warehouse_id,quantity=qty,amount=qty*(line.price if direction=='sale' else line.cost),restock=restock)
+    db.add(obj);db.flush();audit(db,ctx,'create','returns',obj.id)
+    if key:db.add(EventKey(tenant_id=tid,kind='return',key=key,reference_id=obj.id))
+    try:db.commit()
+    except IntegrityError:db.rollback();raise HTTPException(409,'درخواست مرجوعی تکراری است')
+    return as_dict(obj)
+
+@app.get('/api/dashboard')
+def dashboard(db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    tid=ctx['tenant']
+    def scalar(q):return int(q.scalar() or 0)
+    sales=scalar(db.query(func.coalesce(func.sum(SalesOrder.total),0)).filter(SalesOrder.tenant_id==tid,SalesOrder.status!='cancelled'))
+    sales_paid=scalar(db.query(func.coalesce(func.sum(SalesOrder.paid),0)).filter(SalesOrder.tenant_id==tid))
+    purchase=scalar(db.query(func.coalesce(func.sum(PurchaseOrder.total),0)).filter(PurchaseOrder.tenant_id==tid,PurchaseOrder.status!='cancelled'))
+    stock_count=scalar(db.query(func.coalesce(func.sum(Stock.quantity),0)).filter_by(tenant_id=tid))
+    stock_value=scalar(db.query(func.coalesce(func.sum(Stock.quantity*Variant.purchase_cost),0)).join(Variant,Stock.variant_id==Variant.id).filter(Stock.tenant_id==tid,Variant.tenant_id==tid))
+    due_sales=scalar(db.query(func.coalesce(func.sum(SalesOrder.total-SalesOrder.paid),0)).filter(SalesOrder.tenant_id==tid,SalesOrder.status!='cancelled'))
+    low=db.query(Variant).filter_by(tenant_id=tid,active=True).all()
+    low_count=sum(1 for v in low if scalar(db.query(func.coalesce(func.sum(Stock.quantity-Stock.reserved),0)).filter_by(tenant_id=tid,variant_id=v.id))<=v.low_stock)
+    notifications=db.query(Notification).filter_by(tenant_id=tid,read=False).order_by(Notification.created_at.desc()).limit(10).all()
+    return {'sales':sales,'sales_paid':sales_paid,'purchase':purchase,'stock_count':stock_count,'stock_value':stock_value,
+            'receivables':due_sales,'low_stock':low_count,'orders':db.query(SalesOrder).filter_by(tenant_id=tid).count(),
+            'unread':len(notifications),'notifications':[as_dict(x) for x in notifications]}
+
+@app.get('/api/reports')
+def reports(type:str='sales',db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    tid=ctx['tenant']
+    if type=='sales':
+        rows=db.query(SalesOrder).filter_by(tenant_id=tid).order_by(SalesOrder.created_at.desc()).limit(1000).all()
+        return {'rows':[{'number':x.number,'status':x.status,'channel':x.channel,'total':x.total,'paid':x.paid,'date':x.created_at.isoformat()} for x in rows]}
+    if type=='inventory':
+        rows=db.query(Stock,Variant,Warehouse).join(Variant,Stock.variant_id==Variant.id).join(Warehouse,Stock.warehouse_id==Warehouse.id).filter(Stock.tenant_id==tid,Variant.tenant_id==tid,Warehouse.tenant_id==tid).limit(2000).all()
+        return {'rows':[{'sku':v.sku,'warehouse':w.name,'quantity':s.quantity,'reserved':s.reserved,'value':s.quantity*v.purchase_cost} for s,v,w in rows]}
+    if type=='receivables':
+        rows=db.query(SalesOrder).filter(SalesOrder.tenant_id==tid,SalesOrder.total>SalesOrder.paid,SalesOrder.status!='cancelled').all()
+        return {'rows':[{'number':x.number,'due':x.total-x.paid,'customer_id':x.customer_id} for x in rows]}
+    if type=='payables':
+        rows=db.query(PurchaseOrder).filter(PurchaseOrder.tenant_id==tid,PurchaseOrder.total>PurchaseOrder.paid,PurchaseOrder.status!='cancelled').all()
+        return {'rows':[{'number':x.number,'due':x.total-x.paid,'supplier_id':x.supplier_id} for x in rows]}
+    if type=='margins':
+        rows=db.query(SalesLine,SalesOrder).join(SalesOrder,SalesLine.order_id==SalesOrder.id).filter(SalesLine.tenant_id==tid,SalesOrder.tenant_id==tid,SalesOrder.status=='fulfilled').all()
+        return {'rows':[{'sku':db.get(Variant,l.variant_id).sku,'quantity':l.quantity,'revenue':l.quantity*l.price,'cost':l.quantity*l.cost_snapshot,'gross_margin':l.quantity*(l.price-l.cost_snapshot)} for l,_ in rows]}
+    raise HTTPException(422,'نوع گزارش نامعتبر')
+
+@app.post('/api/notifications/{notification_id}/read')
+def read_notification(notification_id:str,db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    obj=tenant_object(db,Notification,ctx['tenant'],notification_id)
+    obj.read=True;db.commit();return {'ok':True}
+
+@app.get('/api/health')
+def health():return {'ok':True,'service':'store-erp'}
+
+@app.get('/api/settings')
+def settings(db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    return as_dict(db.get(Tenant,ctx['tenant']))
+
+@app.patch('/api/settings')
+def update_settings(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,{'owner','admin'})
+    if set(body)-{'name','phone','address'}:raise HTTPException(422,'فیلد نامعتبر')
+    tenant=db.get(Tenant,ctx['tenant'])
+    if 'name' in body: tenant.name=require_string(body['name'],'نام کسب‌وکار',200)
+    for field in ('phone','address'):
+        if field in body:setattr(tenant,field,body[field])
+    audit(db,ctx,'update','tenant',ctx['tenant'])
+    db.commit();return as_dict(tenant)
+
+@app.get('/api/members')
+def members(db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,{'owner','admin'})
+    rows=db.query(Member,User).join(User,Member.user_id==User.id).filter(Member.tenant_id==ctx['tenant']).all()
+    return {'items':[{'id':m.id,'name':u.name,'email':u.email,'role':m.role,'active':m.active} for m,u in rows]}
+
+@app.patch('/api/members/{member_id}')
+def change_member(member_id:str,body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,{'owner','admin'})
+    membership=tenant_object(db,Member,ctx['tenant'],member_id,lock=True)
+    new_role=body.get('role',membership.role)
+    new_active=body.get('active',membership.active)
+    if new_role not in ROLES or type(new_active) is not bool:raise HTTPException(422,'نقش یا وضعیت نامعتبر')
+    if ctx['role']!='owner' and ('owner' in (new_role,membership.role)):
+        raise HTTPException(403,'تغییر مالک فقط توسط مالک دیگر')
+    if membership.user_id==ctx['user'].id and (not new_active or new_role!=membership.role):
+        raise HTTPException(409,'نقش یا عضویت فعلی خودتان را تغییر ندهید')
+    if membership.role=='owner' and (new_role!='owner' or not new_active):
+        count=db.query(Member).filter_by(tenant_id=ctx['tenant'],role='owner',active=True).count()
+        if count<=1:raise HTTPException(409,'آخرین مالک قابل حذف نیست')
+    membership.role=new_role;membership.active=new_active
+    audit(db,ctx,'update','member',membership.id)
+    db.commit();return {'ok':True}
+
+import hashlib as _hashlib
+import secrets as _secrets
+@app.post('/api/invites')
+def invite(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,{'owner','admin'})
+    email=require_string(body.get('email'),'ایمیل',254).lower()
+    role=body.get('role','viewer')
+    if role not in ROLES or role=='owner':raise HTTPException(422,'نقش نامعتبر')
+    key=_secrets.token_urlsafe(32)
+    invite=Invite(tenant_id=ctx['tenant'],email=email,role=role,token_hash=_hashlib.sha256(key.encode()).hexdigest(),expires_at=datetime.now(timezone.utc)+timedelta(days=7))
+    db.add(invite);db.flush();audit(db,ctx,'invite','member',invite.id);db.commit()
+    return {'token':key,'expires_at':invite.expires_at.isoformat(),'email':email,'role':role}
+
+def _lookup_invite(db,key,email):
+    if not isinstance(key,str) or len(key)>200:raise HTTPException(422,'کد دعوت نامعتبر')
+    digest=_hashlib.sha256(key.encode()).hexdigest()
+    inv=db.query(Invite).filter_by(token_hash=digest).with_for_update().first()
+    if not inv or inv.used_at or inv.email!=email or inv.expires_at.replace(tzinfo=timezone.utc)<datetime.now(timezone.utc):
+        raise HTTPException(403,'دعوت منقضی یا نامعتبر است')
+    return inv
+
+@app.post('/api/auth/accept-invite')
+def accept_invite(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    inv=_lookup_invite(db,body.get('token'),ctx['user'].email)
+    if db.query(Member).filter_by(tenant_id=inv.tenant_id,user_id=ctx['user'].id).first():
+        raise HTTPException(409,'قبلاً عضو این سازمان هستید')
+    member=Member(tenant_id=inv.tenant_id,user_id=ctx['user'].id,role=inv.role)
+    db.add(member);inv.used_at=datetime.now(timezone.utc);db.commit()
+    response=JSONResponse({'ok':True,'tenant_id':inv.tenant_id})
+    secure_cookie(response,issue_token(ctx['user'].id,inv.tenant_id))
+    return response
+
+@app.get('/api/organizations')
+def organizations(db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    members=db.query(Member,Tenant).join(Tenant,Member.tenant_id==Tenant.id).filter(Member.user_id==ctx['user'].id,Member.active==True).all()
+    return {'items':[{'id':t.id,'name':t.name,'role':m.role} for m,t in members]}
+
+@app.post('/api/organizations/switch')
+def switch_org(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    membership=db.query(Member).filter_by(user_id=ctx['user'].id,tenant_id=body.get('tenant_id'),active=True).first()
+    if not membership:raise HTTPException(403,'عضویت ندارید')
+    response=JSONResponse({'ok':True})
+    secure_cookie(response,issue_token(ctx['user'].id,membership.tenant_id))
+    return response
+
+@app.get('/api/documents/{kind}/{document_id}/lines')
+def document_lines(kind:str,document_id:str,db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    if kind not in ('sales','purchases'):raise HTTPException(404,'نوع سند نامعتبر')
+    model=SalesOrder if kind=='sales' else PurchaseOrder
+    line_model=SalesLine if kind=='sales' else PurchaseLine
+    tenant_object(db,model,ctx['tenant'],document_id)
+    lines=db.query(line_model).filter_by(tenant_id=ctx['tenant'],order_id=document_id).all()
+    return {'items':[as_dict(l) for l in lines]}

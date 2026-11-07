@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: erp
+      POSTGRES_USER: erp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - erp_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U erp -d erp"]
+      interval: 5s
+      timeout: 3s
+      retries: 8
+  app:
+    build: .
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    environment:
+      DATABASE_URL: postgresql+psycopg2://erp:${POSTGRES_PASSWORD}@postgres:5432/erp
+      APP_SECRET: ${APP_SECRET:?set APP_SECRET in .env}
+      COOKIE_SECURE: 'false'
+volumes:
+  erp_pgdata:
