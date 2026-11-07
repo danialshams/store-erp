@@ -145,3 +145,45 @@ def test_cycle_count_adjustments_and_stale_snapshot():
     assert other.post('/api/stock/cycle-count',json=payload).status_code==404
     movements=client.get('/api/data/movements').json()['items']
     assert any(m['reason']=='cycle_count' and m['delta']==-3 for m in movements)
+
+
+def test_refund_and_vendor_reimbursement_settlement():
+    client=TestClient(app)
+    create_user(client,'settlement-owner')
+    wh=client.get('/api/data/warehouses').json()['items'][0]
+    account=client.get('/api/data/cash-accounts').json()['items'][0]
+    product=create(client,'products',name='کالا با مرجوعی')
+    variant=create(client,'variants',product_id=product['id'],name='بسته',sku='RET-001',purchase_cost=400,retail_price=1000)
+    supplier=create(client,'suppliers',name='تامین کننده تسویه')
+    assert client.post('/api/stock/adjust',json={'warehouse_id':wh['id'],'variant_id':variant['id'],'delta':6,'reason':'opening'}).status_code==200
+    order=client.post('/api/sales',json={'warehouse_id':wh['id'],'items':[{'variant_id':variant['id'],'quantity':2}]}).json()
+    assert client.post('/api/sales/'+order['id']+'/confirm').status_code==200
+    assert client.post('/api/sales/'+order['id']+'/fulfill').status_code==200
+    payment={'sale_id':order['id'],'amount':1500,'account_id':account['id'],'idempotency_key':'refund-payment-1'}
+    assert client.post('/api/payments',json=payment).status_code==200
+    ret=client.post('/api/returns',json={'direction':'sale','order_id':order['id'],'variant_id':variant['id'],'quantity':2,'restock':True}).json()
+    state=client.get('/api/returns/'+ret['id']+'/settlement')
+    assert state.status_code==200,state.text
+    assert state.json()['remaining']==1500
+    p={'amount':700,'account_id':account['id'],'idempotency_key':'refund-1'}
+    first=client.post('/api/returns/'+ret['id']+'/settle',json=p)
+    assert first.status_code==200,first.text
+    assert first.json()['remaining']==800
+    assert client.post('/api/returns/'+ret['id']+'/settle',json=p).status_code==409
+    assert client.post('/api/returns/'+ret['id']+'/settle',json={**p,'idempotency_key':'refund-too-much','amount':801}).status_code==409
+    assert client.post('/api/returns/'+ret['id']+'/settle',json={**p,'idempotency_key':'refund-2','amount':800}).status_code==200
+    assert client.get('/api/returns/'+ret['id']+'/settlement').json()['remaining']==0
+    assert client.post('/api/returns/'+ret['id']+'/settle',json={**p,'idempotency_key':'refund-3','amount':1}).status_code==409
+    po=client.post('/api/purchases',json={'supplier_id':supplier['id'],'warehouse_id':wh['id'],
+                   'items':[{'variant_id':variant['id'],'quantity':3,'cost':400}]}).json()
+    assert client.post('/api/purchases/'+po['id']+'/receive',json={}).status_code==200
+    assert client.post('/api/payments',json={'purchase_id':po['id'],'amount':1200,
+                   'account_id':account['id'],'idempotency_key':'purchase-payment-1'}).status_code==200
+    purchase_return=client.post('/api/returns',json={'direction':'purchase','order_id':po['id'],'variant_id':variant['id'],'quantity':1}).json()
+    assert client.get('/api/returns/'+purchase_return['id']+'/settlement').json()['remaining']==400
+    assert client.post('/api/returns/'+purchase_return['id']+'/settle',json={
+                   'amount':400,'account_id':account['id'],'idempotency_key':'vendor-reimburse-1'}).status_code==200
+    stranger=TestClient(app)
+    create_user(stranger,'settlement-stranger')
+    assert stranger.get('/api/returns/'+ret['id']+'/settlement').status_code==404
+    assert stranger.post('/api/returns/'+ret['id']+'/settle',json=p).status_code==404
