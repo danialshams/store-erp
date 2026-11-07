@@ -514,3 +514,17 @@ def test_revocable_auth_sessions_password_change_and_login_throttle():
     assert wrong.post('/api/auth/login',json={
             'email':'no-such-user-throttle@example.com',
             'password':'invalid-credentials'}).status_code==429
+
+
+def test_csrf_fetch_metadata_rejects_cross_site_without_origin():
+    client=TestClient(app,raise_server_exceptions=False)
+    response=client.post('/api/auth/login',json={'email':'x@example.invalid','password':'test'},
+                         headers={'Sec-Fetch-Site':'cross-site'})
+    assert response.status_code==403,response.text
+
+
+def test_csrf_rejects_origin_scheme_downgrade():
+    client=TestClient(app,base_url='https://testserver',raise_server_exceptions=False)
+    response=client.post('/api/auth/login',json={'email':'x@example.invalid','password':'test'},
+                         headers={'Origin':'http://testserver','Host':'testserver'})
+    assert response.status_code==403,response.text

@@ -86,10 +86,13 @@ def authorized(ctx,roles):
 
 def csrf_guard(request: Request):
     if request.method in ('POST','PATCH','PUT','DELETE'):
+        # Fetch Metadata blocks cross-site browser writes even without Origin.
+        if request.headers.get('sec-fetch-site','').lower() == 'cross-site':
+            raise HTTPException(403,'درخواست از مبدأ غیرمجاز')
         origin=request.headers.get('origin')
         if origin:
             host=request.headers.get('host','')
             from urllib.parse import urlparse
             o=urlparse(origin)
-            if o.netloc != host or o.scheme not in ('http','https'):
+            if o.netloc != host or o.scheme != (request.headers.get('x-forwarded-proto','').split(',')[0].strip() if request.headers.get('x-forwarded-proto','').split(',')[0].strip() in ('http','https') else request.url.scheme):
                 raise HTTPException(403,'درخواست از مبدأ غیرمجاز')
