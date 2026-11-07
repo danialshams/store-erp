@@ -142,7 +142,7 @@ function actionBtns(resource,item){
  }
  if(resource==='returns'&&roleCan('cash-accounts'))
    out+=`<button class="btn btn-small btn-light" data-return-settle="${esc(item.id)}">تسویه وجه ${icon('coins',14)}</button>`;
- if(resource==='notifications'&&!item.read)out+=`<button class="btn btn-small btn-light" data-mark-read="${item.id}">خواندم ${icon('check',14)}</button>`;
+ if(resource==='notifications'&&!item.read&&!state.me?.public_demo)out+=`<button class="btn btn-small btn-light" data-mark-read="${item.id}">خواندم ${icon('check',14)}</button>`;
  return out;
 }
 async function renderCycleCount(selectedWarehouse){
