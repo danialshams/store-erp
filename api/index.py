@@ -479,6 +479,61 @@ def sale_action(sale_id:str,action:str,db:Session=Depends(db_session),ctx:dict=D
     audit(db,ctx,action,'sales',order.id)
     db.commit();return as_dict(order)
 
+@app.post('/api/invoices')
+def issue_invoice(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    """Issue one immutable internal invoice for a confirmed/fulfilled sale."""
+    authorized(ctx,SALES|FINANCE)
+    tid=ctx['tenant']
+    order=tenant_object(db,SalesOrder,tid,body.get('order_id'),lock=True)
+    if order.status not in ('confirmed','fulfilled'):
+        raise HTTPException(409,'فاکتور تنها برای فروش تأیید یا تحویل‌شده صادر می‌شود')
+    existing=db.query(Invoice).filter_by(tenant_id=tid,order_id=order.id).first()
+    if existing:return {'duplicate':True,'invoice':as_dict(existing)}
+    lines=db.query(SalesLine).filter_by(tenant_id=tid,order_id=order.id).all()
+    if not lines:raise HTTPException(409,'سفارش بدون قلم است')
+    subtotal=sum(l.quantity*l.price for l in lines)
+    if subtotal-order.discount!=order.total:
+        raise HTTPException(409,'مبلغ سفارش و ردیف‌ها با هم سازگار نیستند')
+    customer=tenant_object(db,Customer,tid,order.customer_id) if order.customer_id else None
+    obj=Invoice(tenant_id=tid,order_id=order.id,number=_number('INV'),
+                customer_name=customer.name if customer else 'مشتری حضوری',
+                customer_address=customer.address or '' if customer else '',
+                subtotal=subtotal,discount=order.discount,total=order.total,
+                issuer_id=ctx['user'].id)
+    db.add(obj);db.flush()
+    for item in lines:
+        var=tenant_object(db,Variant,tid,item.variant_id)
+        db.add(InvoiceLine(tenant_id=tid,invoice_id=obj.id,variant_id=var.id,
+                           sku_snapshot=var.sku,name_snapshot=var.name,
+                           quantity=item.quantity,price=item.price))
+    audit(db,ctx,'issue_invoice','invoices',obj.id,{'order_id':order.id})
+    notification(db,tid,'فاکتور داخلی صادر شد',f'فاکتور {obj.number} برای سفارش {order.number} ثبت شد.','finance')
+    try:db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing=db.query(Invoice).filter_by(tenant_id=tid,order_id=order.id).first()
+        if existing:return {'duplicate':True,'invoice':as_dict(existing)}
+        raise HTTPException(409,'شماره فاکتور تکراری یا نامعتبر است')
+    return {'duplicate':False,'invoice':as_dict(obj)}
+
+@app.get('/api/invoices')
+def list_invoices(page:int=Query(1,ge=1,le=100000),limit:int=Query(25,ge=1,le=100),
+                  db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,ALL)
+    q=db.query(Invoice).filter_by(tenant_id=ctx['tenant'])
+    total=q.count()
+    records=q.order_by(Invoice.created_at.desc()).offset((page-1)*limit).limit(limit).all()
+    return {'items':[as_dict(x) for x in records],'total':total,'page':page,'limit':limit}
+
+@app.get('/api/invoices/{invoice_id}')
+def get_invoice(invoice_id:str,db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,ALL)
+    obj=tenant_object(db,Invoice,ctx['tenant'],invoice_id)
+    rows=db.query(InvoiceLine).filter_by(tenant_id=ctx['tenant'],invoice_id=obj.id).all()
+    company=db.get(Tenant,ctx['tenant'])
+    return {'invoice':as_dict(obj),'items':[as_dict(x) for x in rows],
+            'company':{'name':company.name,'phone':company.phone,'address':company.address}}
+
 @app.post('/api/payments')
 def record_payment(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
     authorized(ctx,SALES|FINANCE)
