@@ -9,7 +9,7 @@
 - Python 3.12+, FastAPI, SQLAlchemy 2, PostgreSQL 14+ (production), SQLite (local automated tests only)
 - Dependency-light HTML/CSS/JavaScript frontend (no framework lock-in), Persian RTL, Vazirmatn
 - HTTP-only signed session cookie, PBKDF2-SHA256 password hashing (600,000 iterations), tenant-scoped API queries, RBAC checks
-- 30 relational tables with FKs, unique constraints, integer TOMAN money, ISO timestamps; UI formats Jalali dates
+- 32 relational tables with FKs, unique constraints, integer TOMAN money, ISO timestamps; UI formats Jalali dates
 - Stock adjustments and transitions use PostgreSQL advisory transaction locks and row locks, nonnegative/free-stock checks, movement ledger and audit records
 - Docker Compose + PostgreSQL for self-hosting; Vercel Python adapter for temporary hosting
 
@@ -21,18 +21,18 @@
 | Organizations | Manage organization profile, switch memberships, invite existing users, roles |
 | Dashboard | Sales, revenue received, inventory value, receivables, low stock, seven-day chart |
 | Catalog | CRUD categories, products, variants, SKU uniqueness, price snapshots, archive |
-| Warehouses | Multiwarehouse CRUD, stock adjustment, reserved stock, movements |
+| Warehouses | Multiwarehouse CRUD, stock adjustment, reserved stock, movements; transactional cycle count reconciliation with stale-snapshot checks |
 | Transfers | Draft → ship → receive, non-negative stock enforced |
 | Purchasing | Suppliers, purchase orders, items, goods receipts (full/partial), idempotency support |
 | Sales | Customer CRUD, sales orders, reserve/confirm/fulfill/cancel, price snapshot |
 | Payments | Manual payment registration, idempotency, accounting cash entries, notifications |
-| Returns | Sales & supplier returns linked to their orders; returned quantity validation |
+| Returns | Sales & supplier returns linked to their orders; returned quantity validation; manual customer refund and supplier reimbursement settlement with audit and caps |
 | Logistics | Shipment CRUD, carrier, tracking, status |
 | Pricing | Retail/wholesale variant prices, customer groups, editable price lists/items |
-| Finance/reporting | Cash accounts, payments, simple account entries; inventory/sales/margin/receivable/payable reports + CSV |
+| Finance/reporting | Cash accounts, payments, manual return settlement, simple account entries; immutable internal invoice snapshots and printable HTML; inventory/sales/margin/receivable/payable reports + CSV |
 | Settings/audit | Company profile, roles/invites, audit event records |
 
-**What is not production-complete:** real bank gateway/webhook integration, full double-entry bookkeeping/tax invoice issuance, cycle count reconciliation UI, batch/serial FEFO stock deduction, returns refund settlement, shipping provider integrations, external shop sync, email/SMS invite delivery, robust stock allocation at scale, full audit/RLS defense-in-depth, password reset/MFA, server-side report exports/pagination beyond 1000 rows. Those must be built and tested before commercial launch. **Do not represent this version as a fully finished 14-module ERP.**
+**What is not production-complete:** real bank gateway/webhook integration, full double-entry bookkeeping/official tax invoice issuance, batch/serial FEFO stock deduction, shipping provider integrations, external shop sync, email/SMS invite delivery, robust stock allocation at scale, full audit/RLS defense-in-depth, password reset/MFA, server-side report exports/pagination beyond 1000 rows. Those must be built and tested before commercial launch. **Do not represent this version as a fully finished 14-module ERP.**
 
 ## Local development (SQLite only for quick UI checks)
 
@@ -62,9 +62,10 @@ This creates the PostgreSQL service and app service. Data survives container res
 
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0001_schema.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0002_invoices.sql
 ```
 
-For new DBs, `python -m api.init_db` creates the same ORM tables and indexes. For future changes use versioned migrations (e.g. Alembic); do not rely on `create_all` to change existing tables. The current SQL migration was generated from the exact SQLAlchemy models and contains all 30 tables. Run migration once before Vercel production deployment.
+For new DBs, `python -m api.init_db` creates the same ORM tables and indexes. For future changes use versioned migrations (e.g. Alembic); do not rely on `create_all` to change existing tables. Migration 0001 creates the original 30 tables, and additive migration 0002 adds 2 invoice snapshot tables. Use both in order on a fresh database. Run migration once before Vercel production deployment.
 
 ## Temporary Vercel hosting
 
@@ -85,7 +86,9 @@ The repo has a `vercel.json` routing the Python ASGI entrypoint and a static fro
 - `/api/stock/adjust`, `/api/transfers`, `/api/transfers/{id}/{ship|receive|cancel}`
 - `/api/purchases`, `/api/purchases/{id}/receive`
 - `/api/sales`, `/api/sales/{id}/{confirm|fulfill|cancel}`
-- `/api/payments`, `/api/returns`, `/api/dashboard`, `/api/reports`, `/api/settings`
+- `/api/payments`, `/api/returns`, `/api/returns/{id}/settlement`, `/api/returns/{id}/settle`
+- `/api/invoices`, `/api/invoices/{id}`, `/api/invoices/{id}/print`
+- `/api/stock/cycle-sheet`, `/api/stock/cycle-count`, `/api/ready`, `/api/dashboard`, `/api/reports`, `/api/settings`
 - `/api/members`, `/api/invites`, `/api/auth/accept-invite`, `/api/organizations`
 - `/api/docs` OpenAPI browser documentation
 
