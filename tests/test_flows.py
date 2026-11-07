@@ -572,3 +572,56 @@ def test_partial_fulfillment_split_revenue_and_reserve_release():
     assert other.get('/api/fulfillments').json()['total']==0
     assert other.patch('/api/fulfillments/'+all_docs[0]['id'],
         json={'status':'delivered'}).status_code==404
+
+
+def test_sales_tax_credit_limits_and_invoice_vat_snapshots():
+    client=TestClient(app)
+    create_user(client,'tax-owner')
+    warehouse=client.get('/api/data/warehouses').json()['items'][0]
+    customer=create(client,'customers',name='مشتری اعتباری',credit_limit=2500)
+    rate=create(client,'tax-rates',name='مالیات فروش تستی',percentage=10)
+    product=create(client,'products',name='کالای با مالیات')
+    variant=create(client,'variants',product_id=product['id'],name='بسته',
+                   sku='TAX-001',purchase_cost=350,retail_price=1000)
+    assert client.post('/api/stock/adjust',json={'warehouse_id':warehouse['id'],
+                    'variant_id':variant['id'],'delta':5,'reason':'opening'}).status_code==200
+    body={'warehouse_id':warehouse['id'],'customer_id':customer['id'],
+          'discount':100,'tax_rate_id':rate['id'],'payment_terms':'credit',
+          'items':[{'variant_id':variant['id'],'quantity':2}]}
+    sold=client.post('/api/sales',json=body)
+    assert sold.status_code==200,sold.text
+    order=sold.json()
+    assert order['total']==2090 and order['tax_amount']==190
+    assert order['payment_terms']=='credit'
+    assert client.post('/api/sales',json=body).status_code==409
+    view=client.get('/api/credit-exposure').json()
+    record=next(x for x in view['items'] if x['id']==customer['id'])
+    assert record['outstanding']==2090 and record['available']==410
+    assert client.post('/api/sales/'+order['id']+'/confirm').status_code==200
+    assert client.post('/api/sales/'+order['id']+'/fulfill').status_code==200
+    invoice=client.post('/api/invoices',json={'order_id':order['id']})
+    assert invoice.status_code==200,invoice.text
+    snap=invoice.json()['invoice']
+    assert snap['subtotal']==2000 and snap['discount']==100
+    assert snap['tax_amount']==190 and snap['total']==2090
+    assert 'تستی' in snap['tax_name']
+    printed=client.get('/api/invoices/'+snap['id']+'/print')
+    assert printed.status_code==200
+    assert '190' in printed.text
+    ledger=client.get('/api/ledger/trial-balance').json()
+    assert ledger['balanced']
+    vat=next(x for x in ledger['items'] if x['code']=='2100')
+    assert vat['credit']==190
+    returned=client.post('/api/returns',json={
+        'direction':'sale','order_id':order['id'],'variant_id':variant['id'],
+        'quantity':1,'restock':True})
+    assert returned.status_code==200,returned.text
+    assert returned.json()['amount']==1045
+    after=client.get('/api/ledger/trial-balance').json()
+    assert after['balanced']
+    vat=next(x for x in after['items'] if x['code']=='2100')
+    assert vat['credit']-vat['debit']==95
+    outside=TestClient(app)
+    create_user(outside,'tax-outsider')
+    assert outside.get('/api/credit-exposure').json()['total']==0
+    assert outside.post('/api/sales',json={**body}).status_code==404
