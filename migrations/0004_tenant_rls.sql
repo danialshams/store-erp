@@ -10,7 +10,7 @@ BEGIN
  FOR tab IN
    SELECT table_name FROM information_schema.columns
     WHERE table_schema='public' AND column_name='tenant_id'
-      AND table_name NOT IN ('members','invites')
+      AND table_name NOT IN ('members','invites','auth_sessions')
  LOOP
    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY',tab);
    EXECUTE format('DROP POLICY IF EXISTS erp_tenant_guard ON public.%I',tab);
