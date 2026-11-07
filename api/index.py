@@ -720,24 +720,6 @@ def receive_purchase(purchase_id:str,body:dict=Body(default={}),db:Session=Depen
     except IntegrityError:db.rollback();raise HTTPException(409,'دریافت تکراری است')
     return as_dict(order)
 
-@app.post('/api/sales')
-def create_sale(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
-    authorized(ctx,SALES)
-    tid=ctx['tenant'];wh=tenant_object(db,Warehouse,tid,body.get('warehouse_id'))
-    cid=body.get('customer_id')
-    customer=tenant_object(db,Customer,tid,cid,lock=True) if cid else None
-    channel=body.get('channel','retail')
-    if channel not in ('retail','wholesale','online','pos'):raise HTTPException(422,'کانال نامعتبر')
-    lines,total=_create_lines(db,tid,body.get('items'),SalesLine,'wholesale_price' if channel=='wholesale' else 'retail_price','price')
-    discount=amount(body.get('discount',0),'تخفیف')
-    if discount>total:raise HTTPException(422,'تخفیف از کل بیشتر است')
-    rate_id=body.get('tax_rate_id')
-    rate=tenant_object(db,Tax,tid,rate_id) if rate_id else None
-    taxable=total-discount
-    tax_amount=(taxable*rate.percentage+50)//100 if rate else 0
-    terms=body.get('payment_terms','immediate')
-    if terms not in ('immediate','credit'):raise HTTPException(422,'شرایط تسویه نامعتبر است')
-    grand_total=taxable+tax_amount
 
 def _credit_due_by_customer(db:Session,tenant_id:str,customer_ids:list[str]):
     if not customer_ids:return {}
@@ -758,6 +740,25 @@ def _credit_due_by_customer(db:Session,tenant_id:str,customer_ids:list[str]):
     for order in open_sales:
         out[order.customer_id]+=max(0,int(order.total-order.paid-refunded.get(order.id,0)))
     return out
+
+@app.post('/api/sales')
+def create_sale(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,SALES)
+    tid=ctx['tenant'];wh=tenant_object(db,Warehouse,tid,body.get('warehouse_id'))
+    cid=body.get('customer_id')
+    customer=tenant_object(db,Customer,tid,cid,lock=True) if cid else None
+    channel=body.get('channel','retail')
+    if channel not in ('retail','wholesale','online','pos'):raise HTTPException(422,'کانال نامعتبر')
+    lines,total=_create_lines(db,tid,body.get('items'),SalesLine,'wholesale_price' if channel=='wholesale' else 'retail_price','price')
+    discount=amount(body.get('discount',0),'تخفیف')
+    if discount>total:raise HTTPException(422,'تخفیف از کل بیشتر است')
+    rate_id=body.get('tax_rate_id')
+    rate=tenant_object(db,Tax,tid,rate_id) if rate_id else None
+    taxable=total-discount
+    tax_amount=(taxable*rate.percentage+50)//100 if rate else 0
+    terms=body.get('payment_terms','immediate')
+    if terms not in ('immediate','credit'):raise HTTPException(422,'شرایط تسویه نامعتبر است')
+    grand_total=taxable+tax_amount
 
     if terms=='credit':
         if not customer or customer.credit_limit<=0:
