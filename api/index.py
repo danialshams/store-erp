@@ -87,6 +87,51 @@ def audit(db,ctx,action,entity,item=None,details=None):
 def notification(db,tid,title,body,category):
     db.add(Notification(tenant_id=tid,title=title,body=body,category=category))
 
+# Standard editable chart of accounts; no external accounting provider is needed.
+LEDGER_BASE=(
+ ('1010','صندوق نقدی','asset'),('1020','بانک و کارتخوان','asset'),
+ ('1200','حساب‌های دریافتنی','asset'),('1300','موجودی کالا','asset'),
+ ('2000','حساب‌های پرداختنی','liability'),('3000','سرمایه و موجودی افتتاحیه','equity'),
+ ('4000','درآمد فروش','revenue'),('4100','برگشت از فروش','revenue'),
+ ('5000','بهای تمام‌شده فروش','expense'),('6000','تعدیل و کسری انبار','expense'),
+)
+def _ensure_ledger(db,tenant):
+    if db.bind.dialect.name=='postgresql':
+        db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),
+                   {'key':'ledger-accounts:'+tenant})
+    found={x.code:x for x in db.query(LedgerAccount).filter_by(tenant_id=tenant).all()}
+    for code,name,kind in LEDGER_BASE:
+        if code not in found:
+            item=LedgerAccount(tenant_id=tenant,code=code,name=name,kind=kind,active=True)
+            db.add(item);db.flush();found[code]=item
+    return found
+
+def _post_journal(db,ctx,source,memo,postings):
+    """Post a balanced immutable entry within the calling business transaction."""
+    if not postings:return None
+    debit=sum(int(dr) for _,dr,_ in postings)
+    credit=sum(int(cr) for _,_,cr in postings)
+    if debit!=credit or debit<=0 or any(
+        type(dr) is not int or type(cr) is not int or
+        (dr>0)==(cr>0) or dr<0 or cr<0 for _,dr,cr in postings
+    ):
+        raise HTTPException(422,'سند حسابداری باید دوطرفه و تراز باشد')
+    tenant=ctx['tenant']
+    if db.query(Journal).filter_by(tenant_id=tenant,source_key=source).first():
+        raise HTTPException(409,'این رویداد قبلاً در دفتر کل ثبت شده است')
+    accounts=_ensure_ledger(db,tenant)
+    hdr=Journal(tenant_id=tenant,source_key=source,
+                number='J-'+uuid4().hex[:22],memo=str(memo)[:1500],
+                journal_date=date.today(),actor_id=ctx['user'].id)
+    db.add(hdr);db.flush()
+    for code,dr,cr in postings:
+        acct=accounts.get(code)
+        if not acct or not acct.active:raise HTTPException(422,'حساب دفتر کل یافت نشد: '+code)
+        db.add(JournalLine(tenant_id=tenant,journal_id=hdr.id,account_id=acct.id,
+                           debit=dr,credit=cr))
+    db.flush()
+    return hdr
+
 def amount(value,name='مبلغ'):
     if type(value) is not int or value < 0 or value > 9_000_000_000_000_000:
         raise HTTPException(422,f'{name} باید عدد صحیح غیرمنفی باشد')
