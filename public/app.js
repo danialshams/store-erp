@@ -65,7 +65,7 @@ async function api(path,{method='GET',body}={}){
  try{result=await fetch('/api/'+path,{method,headers:{...(body!==undefined?{'Content-Type':'application/json'}:{})},credentials:'same-origin',body:body!==undefined?JSON.stringify(body):undefined})}
  catch(e){throw Error('ارتباط با سرور برقرار نشد')}
  let data;try{data=await result.json()}catch{data={detail:'پاسخ نامعتبر سرور'}}
- if(!result.ok){if(result.status===401&&state.me){state.me=null;renderAuth()}throw Error(typeof data.detail==='string'?data.detail:'خطایی در درخواست رخ داد')}
+ if(!result.ok){if(result.status===401&&state.me){const wasDemo=!!state.me.public_demo;state.me=null;wasDemo?renderShowroomUnavailable():renderAuth()}throw Error(typeof data.detail==='string'?data.detail:'خطایی در درخواست رخ داد')}
  return data;
 }
 async function lookup(resource,reload=false){if(!state.lookups[resource]||reload){const r=await api(`data/${resource}?limit=100`);state.lookups[resource]=r.items||[]}return state.lookups[resource]}
@@ -829,8 +829,35 @@ modals.addEventListener('submit',async e=>{
  try{await fn(e.target)}catch(err){notify(err.message,true);if(btn?.isConnected)btn.disabled=false}
 });
 window.addEventListener('keydown',e=>{if(e.key==='Escape'&&modals.innerHTML)closeModal()});
+function renderShowroomUnavailable(){
+ state.me=null;
+ root.innerHTML=`<main class="auth-layout" dir="rtl"><section class="auth-form-area"><div class="auth-form" role="alert">
+ <div class="auth-logo"><span class="logo-symbol">◈</span> ERP فروشگاهی</div>
+ <h2>در حال اتصال به نسخه نمایشی</h2>
+ <p class="subtitle">پنل برای بازدید عمومی بدون ورود تنظیم شده است. در حال حاضر داده‌های دمو دریافت نشدند؛ اتصال را دوباره بررسی کنید.</p>
+ <button type="button" class="btn btn-primary" id="demo-retry">تلاش دوباره ${icon('swap',17)}</button>
+ </div></section></main>`;
+}
+root.addEventListener('click',e=>{if(e.target.closest('#demo-retry'))window.location.reload()});
 async function boot(){
- try{state.me=await api('auth/me');await maybeAcceptInvite();renderShell();const hash=location.hash.slice(1);state.view=(hash==='dashboard'||META[hash]||['reports','settings','team','cycle-count','invoices','ledger-accounts','ledger-journals','ledger-balance','ledger-profit','analytics','expiry-alerts','integrations','security','fulfillments'].includes(hash))?hash:'dashboard';setView(state.view)}
- catch{renderAuth()}
+ try{
+  state.me=await api('auth/me');
+  await maybeAcceptInvite();
+  renderShell();
+  const hash=location.hash.slice(1);
+  state.view=(hash==='dashboard'||META[hash]||['reports','settings','team','cycle-count','invoices','ledger-accounts','ledger-journals','ledger-balance','ledger-profit','analytics','expiry-alerts','integrations','security','fulfillments'].includes(hash))?hash:'dashboard';
+  setView(state.view);
+ }catch{
+  // An unavailable demo must never accidentally expose the normal login
+  // form to someone visiting the public showroom.
+  try{
+   const status=await fetch('/api/public-mode',{cache:'no-store'});
+   if(status.ok){
+    const mode=await status.json();
+    if(!mode.enabled){renderAuth();return}
+   }
+  }catch{}
+  renderShowroomUnavailable();
+ }
 }
 boot();

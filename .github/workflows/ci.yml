@@ -94,6 +94,15 @@ jobs:
           END $block$;
           ROLLBACK;
           SQL
+          # Public showroom has many synthetic records across all commercial modules.
+          # Apply twice to prove that the seed can safely be rerun.
+          psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0015_enrich_public_demo.sql
+          psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0015_enrich_public_demo.sql
+          test "$(psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -tAc "SELECT count(*) FROM products WHERE tenant_id='demo-erp-tenant-2026'")" -eq 416
+          test "$(psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -tAc "SELECT count(*) FROM variants WHERE tenant_id='demo-erp-tenant-2026'")" -eq 832
+          test "$(psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -tAc "SELECT count(*) FROM stocks WHERE tenant_id='demo-erp-tenant-2026'")" -eq 4992
+          test "$(psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -tAc "SELECT count(*) FROM sales_orders WHERE tenant_id='demo-erp-tenant-2026'")" -eq 460
+          test "$(psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -tAc "SELECT count(*) FROM purchase_orders WHERE tenant_id='demo-erp-tenant-2026'")" -eq 270
 
       - name: PostgreSQL backup/restore disaster recovery drill
         env:
@@ -103,7 +112,7 @@ jobs:
           bash scripts/backup.sh /tmp/store-erp-ci.dump
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -c 'CREATE DATABASE erp_restore OWNER erp'
           bash scripts/restore.sh /tmp/store-erp-ci.dump
-          test "$(psql "$RESTORE_DATABASE_URL" -tAc "SELECT count(*) FROM products WHERE tenant_id='demo-erp-tenant-2026'")" -eq 96
+          test "$(psql "$RESTORE_DATABASE_URL" -tAc "SELECT count(*) FROM products WHERE tenant_id='demo-erp-tenant-2026'")" -eq 416
           test "$(psql "$RESTORE_DATABASE_URL" -tAc "SELECT count(*) FROM fulfillments WHERE tenant_id='demo-erp-tenant-2026'")" -ge 70
           test "$(psql "$RESTORE_DATABASE_URL" -tAc "SELECT count(*) FROM pg_constraint WHERE conname LIKE 'fk_%_tenant'")" -eq 42
           echo 'PostgreSQL backup and safe restore: PASS'

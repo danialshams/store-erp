@@ -55,31 +55,40 @@ DEMO_USER_ID='demo-erp-user-public'
 def public_demo_enabled() -> bool:
     return os.environ.get('PUBLIC_DEMO_ENABLED','false').strip().lower()=='true'
 
+def _demo_context(db:Session):
+    """A dedicated synthetic showroom identity; never a substitute for writes."""
+    tenant=db.get(Tenant,DEMO_TENANT_ID)
+    user=db.get(User,DEMO_USER_ID)
+    if tenant is None or user is None or not user.active:
+        raise HTTPException(503,'داده‌های دموی عمومی هنوز آماده نیست')
+    return {'user':user,'tenant':tenant.id,'role':'owner','public_demo':True}
+
 def context(request:Request,db:Session):
     auth=request.cookies.get('erp_session')
+    can_preview=public_demo_enabled() and request.method in ('GET','HEAD')
     if not auth:
-        if public_demo_enabled() and request.method in ('GET','HEAD'):
-            # The public preview is an isolated tenant, never a real-user session.
-            # This branch is read only; all anonymous writes are rejected upstream.
-            tenant=db.get(Tenant,DEMO_TENANT_ID)
-            user=db.get(User,DEMO_USER_ID)
-            if tenant is None or user is None or not user.active:
-                raise HTTPException(503,'داده‌های دموی عمومی هنوز آماده نیست')
-            return {'user':user,'tenant':tenant.id,'role':'owner','public_demo':True}
+        if can_preview:return _demo_context(db)
         raise HTTPException(401,'ابتدا وارد شوید')
-    claims=parse_token(auth)
-    if not claims: raise HTTPException(401,'نشست منقضی شده است')
-    jti=claims.get('j')
-    if not jti:raise HTTPException(401,'نشست قدیمی است؛ دوباره وارد شوید')
-    active=db.query(AuthSession).filter_by(jti=jti,user_id=claims['u'],
-                tenant_id=claims['t'],revoked_at=None).first()
-    if not active or active.expires_at.replace(tzinfo=timezone.utc)<datetime.now(timezone.utc):
-        raise HTTPException(401,'نشست منقضی یا لغو شده است')
-    user=db.get(User,claims['u'])
-    if not user or not user.active:raise HTTPException(401,'حساب غیرفعال است')
-    member=db.query(Member).filter_by(user_id=user.id,tenant_id=claims['t'],active=True).first()
-    if not member:raise HTTPException(403,'دسترسی به این سازمان ندارید')
-    return {'user':user,'tenant':member.tenant_id,'role':member.role}
+    try:
+        claims=parse_token(auth)
+        if not claims:raise HTTPException(401,'نشست منقضی شده است')
+        jti=claims.get('j')
+        if not jti:raise HTTPException(401,'نشست قدیمی است؛ دوباره وارد شوید')
+        active=db.query(AuthSession).filter_by(jti=jti,user_id=claims['u'],
+                    tenant_id=claims['t'],revoked_at=None).first()
+        if not active or active.expires_at.replace(tzinfo=timezone.utc)<datetime.now(timezone.utc):
+            raise HTTPException(401,'نشست منقضی یا لغو شده است')
+        user=db.get(User,claims['u'])
+        if not user or not user.active:raise HTTPException(401,'حساب غیرفعال است')
+        member=db.query(Member).filter_by(user_id=user.id,tenant_id=claims['t'],active=True).first()
+        if not member:raise HTTPException(403,'دسترسی به این سازمان ندارید')
+        return {'user':user,'tenant':member.tenant_id,'role':member.role}
+    except HTTPException:
+        # An expired/stale browser cookie must not bring back the sign-in
+        # screen when the PUBLIC showroom is intentionally enabled.
+        # Fallback is ONLY for safe reads; write methods keep rejecting.
+        if can_preview:return _demo_context(db)
+        raise
 
 def authorized(ctx,roles):
     if ctx['role'] not in roles: raise HTTPException(403,'اجازه انجام این عملیات را ندارید')
