@@ -226,7 +226,8 @@ SPEC={
 READABLE={
  **{k:(v[0],ALL,v[3]) for k,v in SPEC.items()},
  'stocks':(Stock,ALL,[]),'movements':(Movement,ALL,['reason']),
- 'batches':(StockBatch,ALL,['lot']), 'transfers':(Transfer,ALL,['status']),
+ 'batches':(StockBatch,ALL,['lot']), 'serials':(SerialItem,ALL,['serial','status']),
+ 'lot-movements':(LotMovement,ALL,['reason']), 'transfers':(Transfer,ALL,['status']),
  'purchases':(PurchaseOrder,ALL,['number','status']),
  'purchase-lines':(PurchaseLine,ALL,[]),'sales':(SalesOrder,ALL,['number','status']),
  'sales-lines':(SalesLine,ALL,[]),'payments':(Payment,FINANCE|SALES,['method']),
@@ -320,10 +321,136 @@ def delete_resource(resource:str,item_id:str,db:Session=Depends(db_session),ctx:
 
 # Inventory changes: only this function writes stocks and movements.
 # Per-key transaction advisory lock prevents races even when no balance row exists yet.
-def _stock(db:Session,ctx,warehouse_id,variant_id,delta,reason,ref=None,note=None,release_reserved=0,reserve=0):
+def _record_lot_change(db,ctx,batch,warehouse_id,variant_id,qty,reason,ref):
+    if qty==0:return
+    batch.quantity+=qty
+    if batch.quantity<0:raise HTTPException(409,'موجودی بچ کافی نیست')
+    db.add(LotMovement(tenant_id=ctx['tenant'],warehouse_id=warehouse_id,
+                       variant_id=variant_id,batch_id=batch.id,delta=qty,
+                       reason=reason,reference_id=ref))
+
+def _add_lot(db,ctx,warehouse_id,variant_id,qty,lot,expiry_date,reason,ref):
+    lot=require_string(lot,'شماره بچ',100)
+    expiry=None
+    if expiry_date:
+        try:expiry=date.fromisoformat(expiry_date) if isinstance(expiry_date,str) else expiry_date
+        except (ValueError,TypeError):raise HTTPException(422,'تاریخ انقضا نامعتبر است')
+        if not isinstance(expiry,date):raise HTTPException(422,'تاریخ انقضا نامعتبر است')
+    row=db.query(StockBatch).filter_by(tenant_id=ctx['tenant'],warehouse_id=warehouse_id,
+                  variant_id=variant_id,lot=lot).with_for_update().first()
+    if row:
+        if row.expiry_date!=expiry:raise HTTPException(409,'تاریخ انقضای بچ با رکورد قبلی متفاوت است')
+    else:
+        row=StockBatch(tenant_id=ctx['tenant'],warehouse_id=warehouse_id,
+                       variant_id=variant_id,lot=lot,expiry_date=expiry,quantity=0)
+        db.add(row);db.flush()
+    _record_lot_change(db,ctx,row,warehouse_id,variant_id,qty,reason,ref)
+
+def _take_lots(db,ctx,warehouse_id,variant_id,qty,reason,ref):
+    rows=db.query(StockBatch).filter_by(tenant_id=ctx['tenant'],warehouse_id=warehouse_id,
+                  variant_id=variant_id).with_for_update().all()
+    candidates=[x for x in rows if x.quantity>0 and
+                (reason!='sale_fulfill' or x.expiry_date is None or x.expiry_date>=date.today())]
+    candidates.sort(key=lambda x:(x.expiry_date is None,x.expiry_date or date.max,x.created_at))
+    left=qty
+    for row in candidates:
+        count=min(left,row.quantity)
+        if count:
+            _record_lot_change(db,ctx,row,warehouse_id,variant_id,-count,reason,ref)
+            left-=count
+        if left==0:break
+    if left:raise HTTPException(409,'بچ با موجودی کافی و تاریخ معتبر برای خروج پیدا نشد')
+
+def _restore_lots(db,ctx,warehouse_id,variant_id,qty,reason,ref):
+    if not ref:raise HTTPException(422,'مرجع گردش بچ نامعتبر')
+    source_reason='transfer_ship' if reason=='transfer_receive' else 'sale_fulfill'
+    previous=db.query(LotMovement).filter_by(tenant_id=ctx['tenant'],variant_id=variant_id,
+                        reference_id=ref,reason=source_reason).all()
+    previous=[m for m in previous if m.delta<0]
+    already={}
+    if reason=='customer_return':
+        for m in db.query(LotMovement).filter_by(tenant_id=ctx['tenant'],variant_id=variant_id,
+                                                 reference_id=ref,reason='customer_return').all():
+            already[m.batch_id]=already.get(m.batch_id,0)+m.delta
+    left=qty
+    for m in previous:
+        original=tenant_object(db,StockBatch,ctx['tenant'],m.batch_id)
+        eligible=-m.delta-(already.get(m.batch_id,0) if reason=='customer_return' else 0)
+        count=min(left,max(0,eligible))
+        if count:
+            _add_lot(db,ctx,warehouse_id,variant_id,count,original.lot,
+                     original.expiry_date,reason,ref)
+            already[m.batch_id]=already.get(m.batch_id,0)+count
+            left-=count
+        if left==0:break
+    if left:raise HTTPException(409,'بچ‌های مربوط به سند برای بازگشت کامل پیدا نشد')
+
+def _trace_serials(db,ctx,warehouse_id,variant_id,delta,reason,ref,serials,reserved_after):
+    tid=ctx['tenant']
+    if abs(delta)>100:raise HTTPException(422,'گردش کالا با شماره سریال در هر عملیات حداکثر ۱۰۰ عدد است')
+    if delta>0:
+        if reason=='transfer_receive':
+            rows=db.query(SerialItem).filter_by(tenant_id=tid,variant_id=variant_id,
+                    reference_id=ref,status='in_transit').with_for_update().all()
+            if len(rows)!=delta:raise HTTPException(409,'سریال‌های در مسیر با تعداد حواله تطابق ندارند')
+            for x in rows:x.warehouse_id=warehouse_id;x.status='in_stock';x.reference_id=None
+        elif reason=='customer_return':
+            if not isinstance(serials,list) or len(serials)!=delta or not all(isinstance(x,str) for x in serials) or len(set(serials))!=delta:
+                raise HTTPException(422,'شماره سریال اقلام برگشتی باید دقیقاً مشخص شود')
+            rows=db.query(SerialItem).filter(SerialItem.tenant_id==tid,
+                  SerialItem.variant_id==variant_id,SerialItem.serial.in_(serials)).with_for_update().all()
+            if len(rows)!=delta or any(x.status!='sold' or x.reference_id!=ref for x in rows):
+                raise HTTPException(409,'سریال برگشتی با فروش اصلی مطابقت ندارد')
+            for x in rows:x.warehouse_id=warehouse_id;x.status='in_stock';x.reference_id=None
+        else:
+            if not isinstance(serials,list) or len(serials)!=delta or not all(isinstance(x,str) for x in serials) or len(set(serials))!=delta:
+                raise HTTPException(422,'فهرست سریال‌ها باید دقیقاً برابر تعداد دریافتی باشد')
+            if db.query(SerialItem).filter(SerialItem.tenant_id==tid,
+                  SerialItem.serial.in_(serials)).first():
+                raise HTTPException(409,'شماره سریال قبلاً ثبت شده است')
+            for serial in serials:
+                require_string(serial,'شماره سریال',150)
+                db.add(SerialItem(tenant_id=tid,warehouse_id=warehouse_id,
+                                  variant_id=variant_id,serial=serial,status='in_stock'))
+            try:db.flush()
+            except IntegrityError:
+                db.rollback()
+                raise HTTPException(409,'شماره سریال تکراری است')
+    elif delta<0:
+        rows=db.query(SerialItem).filter_by(tenant_id=tid,warehouse_id=warehouse_id,
+                   variant_id=variant_id,status='in_stock').order_by(
+                       SerialItem.created_at.asc()).with_for_update().limit(-delta).all()
+        if len(rows)!=-delta:raise HTTPException(409,'شماره سریال موجود برای خروج کافی نیست')
+        to_status={'sale_fulfill':'sold','transfer_ship':'in_transit',
+                   'supplier_return':'supplier_returned',
+                   'loss':'retired','damage':'retired'}.get(reason,'retired')
+        for x in rows:x.status=to_status;x.reference_id=ref
+    elif reserved_after>0:
+        count=db.query(SerialItem).filter_by(tenant_id=tid,warehouse_id=warehouse_id,
+                    variant_id=variant_id,status='in_stock').count()
+        if count<reserved_after:raise HTTPException(409,'تعداد سریال‌های موجود کمتر از رزرو است')
+
+def _trace_batches(db,ctx,warehouse_id,variant_id,delta,reason,ref,
+                   reserved_after,lot,expiry_date):
+    tid=ctx['tenant']
+    if delta>0:
+        if reason in ('transfer_receive','customer_return'):
+            _restore_lots(db,ctx,warehouse_id,variant_id,delta,reason,ref)
+        else:
+            _add_lot(db,ctx,warehouse_id,variant_id,delta,lot,expiry_date,reason,ref)
+    elif delta<0:
+        _take_lots(db,ctx,warehouse_id,variant_id,-delta,reason,ref)
+    elif reserved_after>0:
+        total=sum(b.quantity for b in db.query(StockBatch).filter_by(
+               tenant_id=tid,warehouse_id=warehouse_id,variant_id=variant_id).all()
+               if b.expiry_date is None or b.expiry_date>=date.today())
+        if total<reserved_after:raise HTTPException(409,'موجودی بچ معتبر برای رزرو کافی نیست')
+
+
+def _stock(db:Session,ctx,warehouse_id,variant_id,delta,reason,ref=None,note=None,release_reserved=0,reserve=0,lot=None,expiry_date=None,serials=None):
     tid=ctx['tenant']
     tenant_object(db,Warehouse,tid,warehouse_id)
-    tenant_object(db,Variant,tid,variant_id)
+    variant=tenant_object(db,Variant,tid,variant_id)
     if db.bind.dialect.name=='postgresql':
         db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{'key':tid+':'+warehouse_id+':'+variant_id})
     stock=db.query(Stock).filter_by(tenant_id=tid,warehouse_id=warehouse_id,variant_id=variant_id).with_for_update().first()
@@ -334,6 +461,12 @@ def _stock(db:Session,ctx,warehouse_id,variant_id,delta,reason,ref=None,note=Non
     next_reserved=stock.reserved-release_reserved+reserve
     if next_reserved<0 or next_qty<0 or next_qty<next_reserved:raise HTTPException(409,'موجودی آزاد کافی نیست')
     stock.quantity=next_qty;stock.reserved=next_reserved
+    if variant.track_batch:
+        _trace_batches(db,ctx,warehouse_id,variant_id,delta,reason,ref,
+                       next_reserved,lot,expiry_date)
+    if variant.track_serial:
+        _trace_serials(db,ctx,warehouse_id,variant_id,delta,reason,ref,
+                       serials,next_reserved)
     if delta:
         db.add(Movement(tenant_id=tid,warehouse_id=warehouse_id,variant_id=variant_id,delta=delta,reason=reason,reference_id=ref,note=note,actor_id=ctx['user'].id))
     return stock
@@ -345,7 +478,7 @@ def adjust(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(p
     if type(delta) is not int or delta==0 or abs(delta)>1_000_000:raise HTTPException(422,'تغییر موجودی نامعتبر')
     reason=require_string(body.get('reason'),'دلیل',100)
     if reason not in ['opening','correction','damage','loss','cycle_count']:raise HTTPException(422,'دلیل معتبر نیست')
-    stock=_stock(db,ctx,body.get('warehouse_id'),body.get('variant_id'),delta,reason,note=body.get('note'))
+    stock=_stock(db,ctx,body.get('warehouse_id'),body.get('variant_id'),delta,reason,note=body.get('note'),lot=body.get('lot'),expiry_date=body.get('expiry_date'),serials=body.get('serials'))
     cost=tenant_object(db,Variant,ctx['tenant'],body.get('variant_id')).purchase_cost
     value=abs(delta*cost)
     if value:
@@ -376,7 +509,8 @@ def cycle_sheet(warehouse_id:str,page:int=Query(1,ge=1,le=100000),
     return {'warehouse_id':warehouse_id,'page':page,'total':total,
             'items':[{'variant_id':v.id,'sku':v.sku,'name':v.name,
                       'quantity':by_variant[v.id].quantity if v.id in by_variant else 0,
-                      'reserved':by_variant[v.id].reserved if v.id in by_variant else 0}
+                      'reserved':by_variant[v.id].reserved if v.id in by_variant else 0,
+                      'track_batch':v.track_batch,'track_serial':v.track_serial}
                      for v in variants]}
 
 @app.post('/api/stock/cycle-count')
@@ -403,9 +537,9 @@ def cycle_count(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depe
             raise HTTPException(422,'تعداد شمارش‌شده نامعتبر است')
         if type(expected) is not int or expected<0 or expected>1_000_000:
             raise HTTPException(422,'موجودی مبنای شمارش نامعتبر است')
-        checked.append((vid,counted,expected))
-    cycle_id=str(uuid4());result=[]
-    for vid,counted,expected in sorted(checked):
+        checked.append((vid,counted,expected,item.get('lot'),item.get('expiry_date'),item.get('serials')))
+    cycle_id=str(uuid4());result=[];increased=0;decreased=0
+    for vid,counted,expected,lot,expiry,serials in sorted(checked,key=lambda x:x[0]):
         if db.bind.dialect.name=='postgresql':
             db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{'key':tid+':'+warehouse_id+':'+vid})
         row=db.query(Stock).filter_by(tenant_id=tid,warehouse_id=warehouse_id,variant_id=vid).with_for_update().first()
@@ -416,8 +550,16 @@ def cycle_count(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depe
         delta=counted-current
         if delta:
             _stock(db,ctx,warehouse_id,vid,delta,'cycle_count',cycle_id,
-                   note='ثبت انبارگردانی با مبنای موجودی '+str(expected))
+                   note='ثبت انبارگردانی با مبنای موجودی '+str(expected),
+                   lot=lot,expiry_date=expiry,serials=serials)
+            cost=tenant_object(db,Variant,tid,vid).purchase_cost
+            if delta>0:increased+=delta*cost
+            else:decreased+=-delta*cost
         result.append({'variant_id':vid,'previous':current,'counted':counted,'difference':delta})
+    postings=[]
+    if increased:postings.extend([('1300',increased,0),('3000',0,increased)])
+    if decreased:postings.extend([('6000',decreased,0),('1300',0,decreased)])
+    if postings:_post_journal(db,ctx,'cycle-count:'+cycle_id,'ثبت مغایرت انبارگردانی',postings)
     db.add(EventKey(tenant_id=tid,kind='cycle_count',key=key,reference_id=cycle_id))
     audit(db,ctx,'cycle_count','stocks',cycle_id,{'warehouse_id':warehouse_id,'items':result})
     try:db.commit()
@@ -500,7 +642,13 @@ def receive_purchase(purchase_id:str,body:dict=Body(default={}),db:Session=Depen
     lines=db.query(PurchaseLine).filter_by(tenant_id=ctx['tenant'],order_id=order.id).with_for_update().all()
     provided=body.get('items')
     if provided is not None and (not isinstance(provided,list) or not provided):raise HTTPException(422,'اقلام نامعتبر')
-    desired={item['line_id']:positive(item['quantity']) for item in provided} if provided else {l.id:l.quantity-l.received for l in lines if l.quantity>l.received}
+    provided_map={}
+    if provided:
+        for item in provided:
+            if not isinstance(item,dict) or not item.get('line_id') or item['line_id'] in provided_map:
+                raise HTTPException(422,'ردیف دریافتی نامعتبر یا تکراری است')
+            provided_map[item['line_id']]=item
+    desired={line_id:positive(item.get('quantity')) for line_id,item in provided_map.items()} if provided else {l.id:l.quantity-l.received for l in lines if l.quantity>l.received}
     if not desired:raise HTTPException(409,'قلمی برای دریافت وجود ندارد')
     if set(desired)-{l.id for l in lines}:raise HTTPException(422,'ردیف غیرمجاز')
     received_value=0
@@ -508,7 +656,8 @@ def receive_purchase(purchase_id:str,body:dict=Body(default={}),db:Session=Depen
         q=desired.get(line.id,0)
         if q:
             if q>line.quantity-line.received:raise HTTPException(409,'دریافت بیش از تعداد سفارش')
-            _stock(db,ctx,order.warehouse_id,line.variant_id,q,'purchase_receive',order.id)
+            meta=provided_map.get(line.id,{})
+            _stock(db,ctx,order.warehouse_id,line.variant_id,q,'purchase_receive',order.id,lot=meta.get('lot'),expiry_date=meta.get('expiry_date'),serials=meta.get('serials'))
             line.received+=q
             received_value+=q*line.cost
     if received_value:
@@ -732,7 +881,7 @@ def record_return(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=De
         if qty>line.received-int(prior):raise HTTPException(409,'مرجوعی از دریافتی بیشتر است')
     restock=bool(body.get('restock',True))
     if direction=='purchase':_stock(db,ctx,doc.warehouse_id,vid,-qty,'supplier_return',doc.id)
-    elif restock:_stock(db,ctx,doc.warehouse_id,vid,qty,'customer_return',doc.id)
+    elif restock:_stock(db,ctx,doc.warehouse_id,vid,qty,'customer_return',doc.id,serials=body.get('serials'))
     obj=Return(tenant_id=tid,direction=direction,order_id=doc.id if direction=='sale' else None,purchase_id=doc.id if direction=='purchase' else None,variant_id=vid,warehouse_id=doc.warehouse_id,quantity=qty,amount=qty*(line.price if direction=='sale' else line.cost),restock=restock)
     db.add(obj);db.flush()
     postings=[]
@@ -1219,3 +1368,51 @@ def export_resource(resource:str,db:Session=Depends(db_session),ctx:dict=Depends
     return StreamingResponse(iter([csv_text.encode('utf-8')]),media_type='text/csv; charset=utf-8',
                              headers={'Content-Disposition':f'attachment; filename="erp-{resource}.csv"',
                                       'Cache-Control':'no-store'})
+
+
+@app.post('/api/serials/register')
+def serial_register(body:dict=Body(...),db:Session=Depends(db_session),
+                    ctx:dict=Depends(principal)):
+    """Identify legacy on-hand serialized units without altering aggregate stock."""
+    authorized(ctx,WAREHOUSE)
+    wid=body.get('warehouse_id');vid=body.get('variant_id')
+    tenant_object(db,Warehouse,ctx['tenant'],wid)
+    var=tenant_object(db,Variant,ctx['tenant'],vid)
+    if not var.track_serial:raise HTTPException(409,'ردیابی سریال برای این کالا فعال نیست')
+    requested=body.get('serials')
+    if (not isinstance(requested,list) or not 1<=len(requested)<=100 or
+            not all(isinstance(x,str) and 0<len(x)<=150 for x in requested) or
+            len(set(requested))!=len(requested)):
+        raise HTTPException(422,'شماره سریال‌ها تکراری یا نامعتبر هستند')
+    if db.bind.dialect.name=='postgresql':
+        db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{
+            'key':ctx['tenant']+':'+wid+':'+vid})
+    stock=db.query(Stock).filter_by(tenant_id=ctx['tenant'],warehouse_id=wid,
+                variant_id=vid).with_for_update().first()
+    if not stock:raise HTTPException(409,'ابتدا موجودی کالا را ثبت کنید')
+    registered=db.query(SerialItem).filter_by(tenant_id=ctx['tenant'],warehouse_id=wid,
+                             variant_id=vid,status='in_stock').count()
+    if registered+len(requested)>stock.quantity:
+        raise HTTPException(409,'تعداد سریال‌ها از موجودی ثبت‌شده بیشتر است')
+    for serial in requested:
+        db.add(SerialItem(tenant_id=ctx['tenant'],warehouse_id=wid,
+                          variant_id=vid,serial=serial,status='in_stock'))
+    audit(db,ctx,'register','serials',vid,{'count':len(requested),'warehouse_id':wid})
+    try:db.commit()
+    except IntegrityError:db.rollback();raise HTTPException(409,'شماره سریال تکراری است')
+    return {'ok':True,'registered':len(requested)}
+
+@app.get('/api/stock/traceability/{variant_id}')
+def traceability(variant_id:str,warehouse_id:str,
+                 db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,ALL)
+    tenant_object(db,Variant,ctx['tenant'],variant_id)
+    tenant_object(db,Warehouse,ctx['tenant'],warehouse_id)
+    lots=db.query(StockBatch).filter_by(tenant_id=ctx['tenant'],warehouse_id=warehouse_id,
+                variant_id=variant_id).order_by(StockBatch.expiry_date.asc()).all()
+    serials=db.query(SerialItem).filter_by(tenant_id=ctx['tenant'],warehouse_id=warehouse_id,
+                   variant_id=variant_id).order_by(SerialItem.created_at.desc()).limit(300).all()
+    return {'lots':[as_dict(x) for x in lots],
+            'serials':[as_dict(x) for x in serials],
+            'serial_total':db.query(SerialItem).filter_by(tenant_id=ctx['tenant'],
+               warehouse_id=warehouse_id,variant_id=variant_id).count()}

@@ -111,6 +111,26 @@ class StockBatch(Entity,Base):
     quantity: Mapped[int]=mapped_column(Integer,default=0)
     __table_args__=(UniqueConstraint('tenant_id','warehouse_id','variant_id','lot'),CheckConstraint('quantity >= 0'))
 
+class LotMovement(Entity,Base):
+    """Append-only movement for a concrete lot: FEFO, returns, and transfers."""
+    __tablename__='lot_movements'
+    warehouse_id: Mapped[str]=mapped_column(String(36),ForeignKey('warehouses.id'),nullable=False)
+    variant_id: Mapped[str]=mapped_column(String(36),ForeignKey('variants.id'),nullable=False)
+    batch_id: Mapped[str]=mapped_column(String(36),ForeignKey('stock_batches.id'),nullable=False)
+    delta: Mapped[int]=mapped_column(Integer,nullable=False)
+    reason: Mapped[str]=mapped_column(String(40),nullable=False)
+    reference_id: Mapped[str|None]=mapped_column(String(36))
+    __table_args__=(CheckConstraint('delta <> 0'),)
+
+class SerialItem(Entity,Base):
+    __tablename__='serial_items'
+    warehouse_id: Mapped[str]=mapped_column(String(36),ForeignKey('warehouses.id'),nullable=False)
+    variant_id: Mapped[str]=mapped_column(String(36),ForeignKey('variants.id'),nullable=False)
+    serial: Mapped[str]=mapped_column(String(150),nullable=False)
+    status: Mapped[str]=mapped_column(String(25),nullable=False,default='in_stock')
+    reference_id: Mapped[str|None]=mapped_column(String(36))
+    __table_args__=(UniqueConstraint('tenant_id','serial'),)
+
 class Transfer(Entity,Base):
     __tablename__='transfers'
     source_id: Mapped[str]=mapped_column(String(36),ForeignKey('warehouses.id'),nullable=False)
