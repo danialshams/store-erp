@@ -37,6 +37,23 @@ class User(Base):
     active: Mapped[bool]=mapped_column(Boolean, default=True)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), default=now)
 
+class AuthSession(Entity,Base):
+    """Individually revocable signed-cookie session."""
+    __tablename__='auth_sessions'
+    jti: Mapped[str]=mapped_column(String(80),nullable=False,unique=True)
+    user_id: Mapped[str]=mapped_column(String(36),ForeignKey('users.id'),nullable=False)
+    expires_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),nullable=False)
+    revoked_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+    __table_args__=(Index('idx_auth_sessions_user', 'user_id'),)
+
+class LoginThrottle(Base):
+    """Coarse fixed-window lockout; hash contains no plaintext IP/email."""
+    __tablename__='login_throttles'
+    key: Mapped[str]=mapped_column(String(64),primary_key=True)
+    attempts: Mapped[int]=mapped_column(Integer,default=0,nullable=False)
+    window_start: Mapped[datetime]=mapped_column(DateTime(timezone=True),nullable=False)
+    blocked_until: Mapped[datetime|None]=mapped_column(DateTime(timezone=True))
+
 class Member(Entity,Base):
     __tablename__='members'
     user_id: Mapped[str]=mapped_column(String(36), ForeignKey('users.id'), nullable=False)
