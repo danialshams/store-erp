@@ -205,6 +205,9 @@ class SalesOrder(Entity,Base):
     total: Mapped[int]=mapped_column(BigInteger,default=0)
     paid: Mapped[int]=mapped_column(BigInteger,default=0)
     discount: Mapped[int]=mapped_column(BigInteger,default=0)
+    tax_amount: Mapped[int]=mapped_column(BigInteger,default=0,server_default='0')
+    tax_rate_id: Mapped[str|None]=mapped_column(String(36),ForeignKey('tax_rates.id'))
+    payment_terms: Mapped[str]=mapped_column(String(20),default='immediate',server_default='immediate')
     __table_args__=(UniqueConstraint('tenant_id','number'),CheckConstraint('total >= 0 AND paid >= 0 AND paid <= total AND discount >= 0'))
 
 class SalesLine(Entity,Base):
@@ -241,6 +244,8 @@ class Invoice(Entity,Base):
     number: Mapped[str]=mapped_column(String(48),nullable=False)
     customer_name: Mapped[str]=mapped_column(String(220),nullable=False,default='')
     customer_address: Mapped[str]=mapped_column(Text,nullable=False,default='')
+    tax_amount: Mapped[int]=mapped_column(BigInteger,nullable=False,default=0,server_default='0')
+    tax_name: Mapped[str]=mapped_column(String(120),nullable=False,default='',server_default='')
     subtotal: Mapped[int]=mapped_column(BigInteger,nullable=False)
     discount: Mapped[int]=mapped_column(BigInteger,nullable=False,default=0)
     total: Mapped[int]=mapped_column(BigInteger,nullable=False)
