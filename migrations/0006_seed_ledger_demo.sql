@@ -13,16 +13,16 @@ ON CONFLICT (tenant_id,code) DO NOTHING;
 WITH doc AS (
  SELECT 'dj-sale-'||substring(id from 4) AS id,id AS ref,
         'DEMO-LEDGER-S-'||substring(id from 4) AS number,
-        'demo-sale:'+id AS source_key,
+        'demo-sale:'||id AS source_key,
         'ثبت فروش نمونه شماره '||number AS memo,created_at::date AS event_date,created_at
  FROM sales_orders WHERE tenant_id='demo-erp-tenant-2026' AND status='fulfilled' AND total>0
  UNION ALL
  SELECT 'dj-po-'||substring(id from 5),id,'DEMO-LEDGER-P-'||substring(id from 5),
-        'demo-purchase:'+id,'دریافت خرید نمونه '||number,created_at::date,created_at
+        'demo-purchase:'||id,'دریافت خرید نمونه '||number,created_at::date,created_at
  FROM purchase_orders WHERE tenant_id='demo-erp-tenant-2026' AND status IN ('received','partial') AND total>0
  UNION ALL
  SELECT 'dj-pay-'||id,id,'DEMO-LEDGER-PAY-'||id,
-        'demo-payment:'+id,'دریافت یا پرداخت نمونه',created_at::date,created_at
+        'demo-payment:'||id,'دریافت یا پرداخت نمونه',created_at::date,created_at
  FROM payments WHERE tenant_id='demo-erp-tenant-2026' AND amount>0
 )
 INSERT INTO journals(id,tenant_id,created_at,number,source_key,memo,journal_date,actor_id)
