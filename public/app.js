@@ -12,7 +12,7 @@ function icon(name,size=18){return `<span class="icon"><svg width="${size}" heig
 const NAV=[
  ['نمای کلی',[['dashboard','داشبورد','grid'],['notifications','اعلان‌ها','bell']]],
  ['کالا و موجودی',[['products','کالاها','box'],['variants','تنوع و قیمت','layers'],['categories','دسته‌بندی‌ها','tag'],['warehouses','انبارها','warehouse'],['stocks','موجودی کالا','box'],['batches','بچ و تاریخ انقضا','layers'],['serials','شماره سریال‌ها','tag'],['lot-movements','گردش بچ‌ها','layers'],['expiry-alerts','هشدار انقضا','bell'],['movements','گردش انبار','swap'],['cycle-count','انبارگردانی','check'],['transfers','انتقال بین انبارها','swap']]],
- ['خرید و فروش',[['suppliers','تأمین‌کنندگان','truck'],['purchases','سفارش‌های خرید','cart'],['customers','مشتریان','users'],['sales','فروش و سفارش‌ها','cart'],['returns','مرجوعی‌ها','returns'],['shipments','ارسال و رهگیری','truck']]],
+ ['خرید و فروش',[['suppliers','تأمین‌کنندگان','truck'],['purchases','سفارش‌های خرید','cart'],['customers','مشتریان','users'],['sales','فروش و سفارش‌ها','cart'],['fulfillments','ارسال‌های جزئی','truck'],['returns','مرجوعی‌ها','returns'],['shipments','ارسال و رهگیری','truck']]],
  ['امور مالی',[['invoices','فاکتورهای فروش','file'],['payments','پرداخت‌ها','coins'],['cash-accounts','حساب‌ها','card'],['ledger-accounts','کدینگ حسابداری','layers'],['ledger-journals','اسناد حسابداری','file'],['ledger-balance','تراز آزمایشی','chart'],['ledger-profit','سود و زیان','chart'],['account-entries','گردش حساب‌ها','file'],['price-lists','لیست‌های قیمت','tag'],['price-items','قیمت‌های اختصاصی','tag'],['tax-rates','مالیات‌ها','file'],['reports','گزارش‌ها','chart'],['analytics','تحلیل پیشرفته','chart']]],
  ['مدیریت',[['team','کاربران و دسترسی','users'],['settings','تنظیمات کسب‌وکار','settings'],['security','امنیت و نشست‌ها','settings'],['integrations','اتصالات آینده','settings'],['audit','تاریخچه عملیات','clock']]]
 ];
@@ -108,6 +108,7 @@ async function loadView(){
  try{
    if(state.view==='dashboard')await renderDashboard();
    else if(state.view==='invoices')await renderInvoices();
+   else if(state.view==='fulfillments')await renderFulfillments();
    else if(state.view==='reports')await renderReports();
    else if(state.view==='analytics')await renderAnalytics();
    else if(state.view==='expiry-alerts')await renderExpiryAlerts();
@@ -143,9 +144,10 @@ function actionBtns(resource,item){
    if(roleCan('cash-accounts')&&item.paid<item.total)out+=`<button class="btn btn-small btn-light" data-document-action="pay-purchase:${item.id}">پرداخت ${icon('coins',14)}</button>`;
  }
  if(allowed && resource==='sales'){
-   const statuses={draft:[['confirm','تأیید'],['cancel','لغو']],confirmed:[['fulfill','تحویل'],['cancel','لغو']]};
+   const statuses={draft:[['confirm','تأیید'],['cancel','لغو']],confirmed:[['fulfill','تحویل کامل'],['cancel','لغو']],partial:[['fulfill','ارسال مانده']]};
    (statuses[item.status]||[]).forEach(([act,t])=>out+=`<button class="btn btn-small ${act==='cancel'?'btn-danger':'btn-primary'}" data-workflow="sales:${item.id}:${act}">${t} ${icon(act==='cancel'?'x':'check',14)}</button>`);
-   if(item.status==='fulfilled')out+=`<button class="btn btn-small btn-light" data-document-action="sale-return:${item.id}">مرجوعی ${icon('returns',14)}</button>`;
+   if(['confirmed','partial'].includes(item.status))out+=`<button class="btn btn-small btn-outline" data-partial-fulfill="${esc(item.id)}">ارسال جزئی ${icon('truck',14)}</button>`;
+   if(['fulfilled','partial'].includes(item.status))out+=`<button class="btn btn-small btn-light" data-document-action="sale-return:${item.id}">مرجوعی ${icon('returns',14)}</button>`;
    if(item.status!=='cancelled'&&item.paid<item.total)out+=`<button class="btn btn-small btn-light" data-document-action="pay-sale:${item.id}">پرداخت ${icon('coins',14)}</button>`;
  }
  if(resource==='returns'&&roleCan('cash-accounts'))
@@ -369,6 +371,63 @@ async function openReturn(kind,id){
  },{save:'ثبت مرجوعی'});
 }
 const REPORT_TYPES=[['sales','عملکرد فروش'],['inventory','ارزش موجودی'],['margins','حاشیه سود'],['receivables','مطالبات'],['payables','بدهی خرید']];
+async function renderFulfillments(){
+ const d=await api('fulfillments?page='+state.page+'&limit=30');
+ const rows=d.items.map(x=>`<tr><td>${esc(x.number)}</td><td>${esc(x.order_id)}</td>
+ <td>${money(x.revenue)}</td><td>${dateFa(x.created_at)}</td>
+ <td>${status(x.status)}</td><td><button class="btn btn-small btn-outline" data-fulfillment-details="${esc(x.id)}">جزئیات ${icon('file',14)}</button></td></tr>`).join('');
+ $('#page-content').innerHTML=`${head('محموله‌ها و ارسال جزئی',
+ 'مشاهده محموله‌های ثبت‌شده و اقلام هر ارسال؛ برای هر سفارش می‌توان چند بار ارسال کرد')}
+ <div class="panel"><div class="table-wrap"><table class="table"><thead><tr><th>شماره محموله</th><th>شناسه سفارش</th>
+ <th>ارزش ارسالی</th><th>تاریخ</th><th>وضعیت</th><th>جزئیات</th></tr></thead>
+ <tbody>${rows||'<tr><td colspan="6" class="muted">محموله‌ای ثبت نشده است.</td></tr>'}</tbody></table></div>
+ <div class="pagination"><span>${fa(d.total)} محموله · صفحه ${fa(state.page)}</span>
+ <div class="row"><button class="btn btn-small btn-outline" id="fulfill-prev" ${state.page<=1?'disabled':''}>قبلی</button>
+ <button class="btn btn-small btn-outline" id="fulfill-next" ${state.page*30>=d.total?'disabled':''}>بعدی</button></div></div></div>
+ <p class="hint">در هر ارسال مقدار رزروشده آزاد و به همان میزان موجودی کسر می‌شود. دفتر کل و تاریخچه انبار جداگانه ثبت می‌شوند.</p>`;
+}
+async function openFulfillmentDetails(id){
+ const d=await api('fulfillments?page=1&limit=100');
+ const obj=d.items.find(x=>x.id===id);
+ if(!obj)return notify('محموله یافت نشد',true);
+ const variants=await lookup('variants');
+ const rows=(obj.items||[]).map(line=>`<tr><td>${esc(variants.find(x=>x.id===line.variant_id)?.sku||line.variant_id)}</td>
+ <td>${fa(line.quantity)}</td><td>${money(line.unit_price)}</td></tr>`).join('');
+ const form=`<div class="notice">محموله: ${esc(obj.number)} — وضعیت ${esc(obj.status)}</div>
+ <div class="table-wrap"><table class="table"><thead><tr><th>کالا</th><th>تعداد</th><th>قیمت</th></tr></thead>
+ <tbody>${rows}</tbody></table></div><p class="hint">شرکت حمل: ${esc(obj.carrier||'—')} | رهگیری: ${esc(obj.tracking_number||'—')}</p>
+ ${roleCan('shipments')&&obj.status!=='delivered'?`<div class="form-grid"><div class="field"><label>شرکت حمل</label><input class="input" name="carrier" maxlength="120" value="${esc(obj.carrier||'')}"></div>
+ <div class="field"><label>کد رهگیری</label><input class="input" name="tracking_number" maxlength="120" value="${esc(obj.tracking_number||'')}"></div>
+ <div class="field"><label>وضعیت</label>${selectField('status',[{id:'shipped',label:'ارسال شده'},{id:'delivered',label:'تحویل شده'}],obj.status)}</div></div>`:''}`;
+ showModal('جزئیات محموله',form,async modal=>{
+  if(roleCan('shipments')&&obj.status!=='delivered'){
+   const fd=new FormData(modal);
+   await api('fulfillments/'+encodeURIComponent(id),{method:'PATCH',body:{
+     carrier:fd.get('carrier'),tracking_number:fd.get('tracking_number'),status:fd.get('status')}});
+  }
+  closeModal();notify('جزئیات محموله بررسی شد');renderFulfillments();
+ },{save:roleCan('shipments')&&obj.status!=='delivered'?'ذخیره ارسال':'بستن'});
+}
+async function openPartialFulfill(id){
+ const [doc,variants]=await Promise.all([
+   api('documents/sales/'+encodeURIComponent(id)+'/lines'),lookup('variants')]);
+ const rows=doc.items.filter(x=>x.fulfilled<x.quantity);
+ if(!rows.length)return notify('تمام سفارش تحویل شده است',true);
+ const html=`<div class="notice">تعداد باقی‌مانده از سفارش را برای ارسال انتخاب کنید. چند محموله برای یک سفارش مجاز است.</div>
+ ${rows.map(x=>`<div class="field partial-line" data-id="${esc(x.id)}" style="margin-top:12px">
+ <label>${esc(variants.find(v=>v.id===x.variant_id)?.sku||x.variant_id)} — مانده ${fa(x.quantity-x.fulfilled)} عدد</label>
+ <input class="input" type="number" min="0" max="${x.quantity-x.fulfilled}" step="1" value="${x.quantity-x.fulfilled}"></div>`).join('')}`;
+ showModal('ثبت ارسال جزئی',html,async form=>{
+  const items=$('.partial-line',form).map(row=>({
+     line_id:row.dataset.id,quantity:Number(row.querySelector('input').value)
+  })).filter(x=>x.quantity>0);
+  if(!items.length)throw Error('حداقل یک قلم برای ارسال انتخاب کنید');
+  await api('sales/'+encodeURIComponent(id)+'/fulfill-partial',{method:'POST',
+      body:{items,idempotency_key:uid()}});
+  closeModal();notify('محموله ثبت شد؛ موجودی و حسابداری به‌روزرسانی شدند');loadView();
+ },{save:'ثبت ارسال',wide:true});
+}
+
 async function renderInvoices(){
  const result=await api('invoices?page='+state.page+'&limit=25');
  const btn=(roleCan('sales')||roleCan('cash-accounts'))?
@@ -643,6 +702,10 @@ root.addEventListener('click',async e=>{
  if(btn.id==='expiry-prev'){state.page=Math.max(1,state.page-1);return renderExpiryAlerts()}
  if(btn.id==='expiry-next'){state.page++;return renderExpiryAlerts()}
  if(btn.hasAttribute('data-configure-integration'))return openConfigureIntegration(btn.dataset.configureIntegration);
+ if(btn.hasAttribute('data-partial-fulfill'))return openPartialFulfill(btn.dataset.partialFulfill);
+ if(btn.hasAttribute('data-fulfillment-details'))return openFulfillmentDetails(btn.dataset.fulfillmentDetails);
+ if(btn.id==='fulfill-prev'){state.page=Math.max(1,state.page-1);return renderFulfillments()}
+ if(btn.id==='fulfill-next'){state.page++;return renderFulfillments()}
  if(btn.id==='ledger-new-account')return openLedgerAccount();
  if(btn.id==='ledger-setup'){await api('ledger/bootstrap',{method:'POST',body:{}});notify('حساب‌ها ایجاد شدند');return renderLedger()}
  if(btn.id==='ledger-new-journal')return openLedgerJournal();
@@ -741,7 +804,7 @@ modals.addEventListener('submit',async e=>{
 });
 window.addEventListener('keydown',e=>{if(e.key==='Escape'&&modals.innerHTML)closeModal()});
 async function boot(){
- try{state.me=await api('auth/me');await maybeAcceptInvite();renderShell();const hash=location.hash.slice(1);state.view=(hash==='dashboard'||META[hash]||['reports','settings','team','cycle-count','invoices','ledger-accounts','ledger-journals','ledger-balance','ledger-profit','analytics','expiry-alerts','integrations','security'].includes(hash))?hash:'dashboard';setView(state.view)}
+ try{state.me=await api('auth/me');await maybeAcceptInvite();renderShell();const hash=location.hash.slice(1);state.view=(hash==='dashboard'||META[hash]||['reports','settings','team','cycle-count','invoices','ledger-accounts','ledger-journals','ledger-balance','ledger-profit','analytics','expiry-alerts','integrations','security','fulfillments'].includes(hash))?hash:'dashboard';setView(state.view)}
  catch{renderAuth()}
 }
 boot();
