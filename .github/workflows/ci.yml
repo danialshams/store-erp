@@ -39,7 +39,7 @@ jobs:
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0002_invoices.sql
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0003_seed_public_demo.sql
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0003_seed_public_demo.sql
-          python -c "from api.db import engine; from sqlalchemy import inspect; n=len(inspect(engine).get_table_names()); print(f'PostgreSQL tables: {n}'); assert n >= 38"
+          python -c "from api.db import engine; from sqlalchemy import inspect; n=len(inspect(engine).get_table_names()); print(f'PostgreSQL tables: {n}'); assert n >= 40"
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0004_tenant_rls.sql
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0005_finance_ledger.sql
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0006_seed_ledger_demo.sql
@@ -48,6 +48,7 @@ jobs:
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0008_seed_integrations_ledger.sql
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0009_traceability.sql
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0010_seed_traceability_demo.sql
+          psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0011_revocable_sessions.sql
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 -f migrations/0010_seed_traceability_demo.sql
           psql 'postgresql://erp:ci-only-secret@localhost:5432/erp' -v ON_ERROR_STOP=1 <<'SQL'
           CREATE ROLE erp_rls_test;

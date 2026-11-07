@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 import os
-import io, csv
+import io, csv, hashlib, hmac
 from html import escape as html_escape
 from fastapi import FastAPI, Request, HTTPException, Depends, Body, Query
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, StreamingResponse
@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .db import Session as DbSession, init_db, engine
 from .models import *
-from .security import issue_token, make_password, verify_password, context, authorized, csrf_guard, public_demo_enabled, ROLES, ALL, CATALOG, WAREHOUSE, SALES, PURCHASE, FINANCE
+from .security import issue_token, parse_token, SECRET, make_password, verify_password, context, authorized, csrf_guard, public_demo_enabled, ROLES, ALL, CATALOG, WAREHOUSE, SALES, PURCHASE, FINANCE
 
 app=FastAPI(title='ERP فروشگاهی',docs_url='/api/docs',openapi_url='/api/openapi.json',redoc_url=None)
 PUBLIC=Path(__file__).resolve().parent.parent/'public'
@@ -152,6 +152,43 @@ def require_string(value,label='مقدار',maxlen=200):
         raise HTTPException(422,f'{label} الزامی است')
     return value.strip()
 
+def _persist_session(db:Session,token:str):
+    claim=parse_token(token)
+    if not claim or not claim.get('j'):raise HTTPException(500,'صدور نشست امن ناموفق بود')
+    db.add(AuthSession(tenant_id=claim['t'],user_id=claim['u'],jti=claim['j'],
+                       expires_at=datetime.fromtimestamp(claim['exp'],timezone.utc)))
+    db.commit()
+    return token
+
+def _throttle_key(email:str,remote:str)->str:
+    return hmac.new(SECRET.encode(),(email.lower()+'|'+remote).encode(),
+                    hashlib.sha256).hexdigest()
+
+def _login_attempt(db:Session,email:str,remote:str,success:bool=False):
+    key=_throttle_key(email,remote)
+    if db.bind.dialect.name=='postgresql':
+        db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{'key':'login:'+key})
+    now=datetime.now(timezone.utc)
+    row=db.query(LoginThrottle).filter_by(key=key).with_for_update().first()
+    if not row:
+        row=LoginThrottle(key=key,attempts=0,window_start=now)
+        db.add(row)
+    start=row.window_start
+    if start and start.tzinfo is None:start=start.replace(tzinfo=timezone.utc)
+    if not start or now-start>timedelta(minutes=10):
+        row.window_start=now;row.attempts=0;row.blocked_until=None
+    block=row.blocked_until
+    if block and block.tzinfo is None:block=block.replace(tzinfo=timezone.utc)
+    if block and block>now and not success:
+        db.commit()
+        raise HTTPException(429,'تلاش‌های ورود بیش از حد است؛ کمی بعد دوباره امتحان کنید')
+    if success:
+        row.attempts=0;row.blocked_until=None
+    else:
+        row.attempts+=1
+        if row.attempts>=8:row.blocked_until=now+timedelta(minutes=10)
+    db.commit()
+
 def secure_cookie(response,token):
     response.set_cookie('erp_session',token,httponly=True,secure=(os.environ.get('COOKIE_SECURE','true' if os.environ.get('VERCEL') else 'false').lower()=='true'),samesite='lax',max_age=604800,path='/')
 
@@ -180,13 +217,17 @@ def register(body:dict=Body(...),db:Session=Depends(db_session)):
         db.commit()
     except IntegrityError:db.rollback();raise HTTPException(409,'ایمیل تکراری است')
     response=JSONResponse({'ok':True,'tenant_id':tenant.id})
-    secure_cookie(response,issue_token(user.id,tenant.id))
+    secure_cookie(response,_persist_session(db,issue_token(user.id,tenant.id)))
     return response
 
 @app.post('/api/auth/login')
-def login(body:dict=Body(...),db:Session=Depends(db_session)):
+def login(body:dict=Body(...),req:Request=None,db:Session=Depends(db_session)):
     email=str(body.get('email','')).lower().strip()
     password=str(body.get('password',''))
+    if not email or len(email)>254 or len(password)>300:
+        raise HTTPException(422,'اطلاعات ورود نامعتبر است')
+    ip=req.client.host if req and req.client else 'unknown'
+    _login_attempt(db,email,ip,success=False)
     user=db.query(User).filter_by(email=email,active=True).first()
     # Verify fixed fake digest on unknown user for roughly equal work.
     if not user or not verify_password(password,user.password_hash):
@@ -194,12 +235,20 @@ def login(body:dict=Body(...),db:Session=Depends(db_session)):
         raise HTTPException(401,'ایمیل یا رمز عبور اشتباه است')
     membership=db.query(Member).filter_by(user_id=user.id,active=True).first()
     if not membership:raise HTTPException(403,'عضویت فعالی ندارید')
+    _login_attempt(db,email,ip,success=True)
     response=JSONResponse({'ok':True})
-    secure_cookie(response,issue_token(user.id,membership.tenant_id))
+    secure_cookie(response,_persist_session(db,issue_token(user.id,membership.tenant_id)))
     return response
 
 @app.post('/api/auth/logout')
-def logout():
+def logout(req:Request,db:Session=Depends(db_session)):
+    claim=parse_token(req.cookies.get('erp_session',''))
+    if claim and claim.get('j'):
+        item=db.query(AuthSession).filter_by(jti=claim['j'],user_id=claim['u'],
+                                          tenant_id=claim['t']).with_for_update().first()
+        if item:
+            item.revoked_at=datetime.now(timezone.utc)
+            db.commit()
     response=JSONResponse({'ok':True})
     response.delete_cookie('erp_session',path='/')
     return response
@@ -1074,7 +1123,7 @@ def accept_invite(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=De
     member=Member(tenant_id=inv.tenant_id,user_id=ctx['user'].id,role=inv.role)
     db.add(member);inv.used_at=datetime.now(timezone.utc);db.commit()
     response=JSONResponse({'ok':True,'tenant_id':inv.tenant_id})
-    secure_cookie(response,issue_token(ctx['user'].id,inv.tenant_id))
+    secure_cookie(response,_persist_session(db,issue_token(ctx['user'].id,inv.tenant_id)))
     return response
 
 @app.get('/api/organizations')
@@ -1087,7 +1136,7 @@ def switch_org(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depen
     membership=db.query(Member).filter_by(user_id=ctx['user'].id,tenant_id=body.get('tenant_id'),active=True).first()
     if not membership:raise HTTPException(403,'عضویت ندارید')
     response=JSONResponse({'ok':True})
-    secure_cookie(response,issue_token(ctx['user'].id,membership.tenant_id))
+    secure_cookie(response,_persist_session(db,issue_token(ctx['user'].id,membership.tenant_id)))
     return response
 
 @app.get('/api/documents/{kind}/{document_id}/lines')
@@ -1416,3 +1465,38 @@ def traceability(variant_id:str,warehouse_id:str,
             'serials':[as_dict(x) for x in serials],
             'serial_total':db.query(SerialItem).filter_by(tenant_id=ctx['tenant'],
                warehouse_id=warehouse_id,variant_id=variant_id).count()}
+
+
+@app.get('/api/auth/sessions')
+def list_sessions(db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    rows=db.query(AuthSession).filter_by(user_id=ctx['user'].id,
+             tenant_id=ctx['tenant']).order_by(AuthSession.created_at.desc()).limit(100).all()
+    return {'items':[{'id':x.id,'created_at':x.created_at.isoformat(),
+                      'expires_at':x.expires_at.isoformat(),
+                      'revoked':x.revoked_at is not None} for x in rows]}
+
+@app.post('/api/auth/sessions/{session_id}/revoke')
+def revoke_session(session_id:str,db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    item=db.query(AuthSession).filter_by(id=session_id,user_id=ctx['user'].id,
+                 tenant_id=ctx['tenant']).with_for_update().first()
+    if not item:raise HTTPException(404,'نشست موجود نیست')
+    item.revoked_at=datetime.now(timezone.utc)
+    db.commit()
+    return {'ok':True}
+
+@app.post('/api/auth/password/change')
+def change_password(body:dict=Body(...),db:Session=Depends(db_session),
+                    ctx:dict=Depends(principal)):
+    old=body.get('current_password');new=body.get('new_password')
+    if not isinstance(old,str) or not verify_password(old,ctx['user'].password_hash):
+        raise HTTPException(403,'رمز عبور فعلی نادرست است')
+    if not isinstance(new,str) or not 12<=len(new)<=200:
+        raise HTTPException(422,'رمز عبور جدید باید حداقل ۱۲ نویسه باشد')
+    ctx['user'].password_hash=make_password(new)
+    db.query(AuthSession).filter_by(user_id=ctx['user'].id).update({
+        AuthSession.revoked_at:datetime.now(timezone.utc)})
+    audit(db,ctx,'password_change','users',ctx['user'].id)
+    db.commit()
+    response=JSONResponse({'ok':True})
+    response.delete_cookie('erp_session',path='/')
+    return response

@@ -1,8 +1,9 @@
 """Password hashing, authenticated cookies, role gates and request CSRF guard."""
 import os, secrets, hmac, hashlib, time, base64, json
 from fastapi import HTTPException, Request
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
-from .models import User, Member, Tenant
+from .models import User, Member, AuthSession, Tenant
 
 SECRET=os.environ.get('APP_SECRET', '')
 if not SECRET:
@@ -35,7 +36,7 @@ def _b64(b): return base64.urlsafe_b64encode(b).rstrip(b'=').decode()
 def _unb64(s): return base64.urlsafe_b64decode(s+'='*(-len(s)%4))
 
 def issue_token(user_id, tenant_id):
-    payload=_b64(json.dumps({'u':user_id,'t':tenant_id,'exp':int(time.time())+604800},separators=(',',':')).encode())
+    payload=_b64(json.dumps({'u':user_id,'t':tenant_id,'j':secrets.token_urlsafe(24),'exp':int(time.time())+604800},separators=(',',':')).encode())
     sign=_b64(hmac.new(SECRET.encode(),payload.encode(),hashlib.sha256).digest())
     return payload+'.'+sign
 
@@ -68,6 +69,12 @@ def context(request:Request,db:Session):
         raise HTTPException(401,'ابتدا وارد شوید')
     claims=parse_token(auth)
     if not claims: raise HTTPException(401,'نشست منقضی شده است')
+    jti=claims.get('j')
+    if not jti:raise HTTPException(401,'نشست قدیمی است؛ دوباره وارد شوید')
+    active=db.query(AuthSession).filter_by(jti=jti,user_id=claims['u'],
+                tenant_id=claims['t'],revoked_at=None).first()
+    if not active or active.expires_at.replace(tzinfo=timezone.utc)<datetime.now(timezone.utc):
+        raise HTTPException(401,'نشست منقضی یا لغو شده است')
     user=db.get(User,claims['u'])
     if not user or not user.active:raise HTTPException(401,'حساب غیرفعال است')
     member=db.query(Member).filter_by(user_id=user.id,tenant_id=claims['t'],active=True).first()
