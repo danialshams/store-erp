@@ -944,3 +944,116 @@ def document_lines(kind:str,document_id:str,db:Session=Depends(db_session),ctx:d
     tenant_object(db,model,ctx['tenant'],document_id)
     lines=db.query(line_model).filter_by(tenant_id=ctx['tenant'],order_id=document_id).all()
     return {'items':[as_dict(l) for l in lines]}
+
+@app.get('/api/ledger/accounts')
+def ledger_accounts(db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE|{'viewer'})
+    accounts=db.query(LedgerAccount).filter_by(tenant_id=ctx['tenant']).order_by(LedgerAccount.code).all()
+    return {'items':[as_dict(x) for x in accounts],'total':len(accounts)}
+
+@app.post('/api/ledger/bootstrap')
+def ledger_bootstrap(db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE)
+    data=_ensure_ledger(db,ctx['tenant'])
+    db.commit()
+    return {'ok':True,'total':len(data)}
+
+@app.post('/api/ledger/accounts')
+def ledger_account_create(body:dict=Body(...),db:Session=Depends(db_session),
+                          ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE)
+    code=require_string(body.get('code'),'کد حساب',20)
+    name=require_string(body.get('name'),'نام حساب',180)
+    kind=body.get('kind')
+    if kind not in ('asset','liability','equity','revenue','expense'):
+        raise HTTPException(422,'نوع حساب نامعتبر است')
+    if not code.isdigit():raise HTTPException(422,'کد حساب فقط باید عدد باشد')
+    obj=LedgerAccount(tenant_id=ctx['tenant'],code=code,name=name,kind=kind,active=True)
+    db.add(obj);audit(db,ctx,'create','ledger_accounts',obj.id)
+    try:db.commit()
+    except IntegrityError:db.rollback();raise HTTPException(409,'کد حساب تکراری است')
+    return as_dict(obj)
+
+@app.get('/api/ledger/journals')
+def ledger_journals(page:int=Query(1,ge=1,le=100000),limit:int=Query(40,ge=1,le=100),
+                    start:date|None=None,end:date|None=None,
+                    db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE|{'viewer'})
+    q=db.query(Journal).filter_by(tenant_id=ctx['tenant'])
+    if start:q=q.filter(Journal.journal_date>=start)
+    if end:q=q.filter(Journal.journal_date<=end)
+    total=q.count()
+    entries=q.order_by(Journal.journal_date.desc(),Journal.created_at.desc()).offset(
+        (page-1)*limit).limit(limit).all()
+    return {'items':[as_dict(x) for x in entries],'page':page,'limit':limit,'total':total}
+
+@app.get('/api/ledger/journals/{entry_id}')
+def ledger_journal(entry_id:str,db:Session=Depends(db_session),
+                   ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE|{'viewer'})
+    doc=tenant_object(db,Journal,ctx['tenant'],entry_id)
+    lines=db.query(JournalLine).filter_by(tenant_id=ctx['tenant'],journal_id=doc.id).all()
+    return {'journal':as_dict(doc),'lines':[as_dict(x) for x in lines]}
+
+@app.post('/api/ledger/journals')
+def ledger_journal_create(body:dict=Body(...),db:Session=Depends(db_session),
+                          ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE)
+    key=require_string(body.get('idempotency_key'),'شناسه یکتا',150)
+    source='manual:'+key
+    if db.query(Journal).filter_by(tenant_id=ctx['tenant'],source_key=source).first():
+        raise HTTPException(409,'این سند قبلاً ثبت شده است')
+    raw=body.get('lines')
+    if not isinstance(raw,list) or len(raw)<2 or len(raw)>50:
+        raise HTTPException(422,'سند باید بین ۲ تا ۵۰ ردیف داشته باشد')
+    lines=[]
+    for item in raw:
+        if not isinstance(item,dict):raise HTTPException(422,'ردیف نامعتبر')
+        account=tenant_object(db,LedgerAccount,ctx['tenant'],item.get('account_id'))
+        if not account.active:raise HTTPException(409,'حساب غیرفعال')
+        debit=amount(item.get('debit',0),'بدهکار')
+        credit=amount(item.get('credit',0),'بستانکار')
+        lines.append((account.code,debit,credit))
+    memo=require_string(body.get('memo'),'شرح سند',900)
+    doc=_post_journal(db,ctx,source,memo,lines)
+    audit(db,ctx,'create','journals',doc.id)
+    try:db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,'شماره یا شناسه سند تکراری است')
+    return {'journal':as_dict(doc),'total':sum(line[1] for line in lines)}
+
+@app.get('/api/ledger/trial-balance')
+def trial_balance(start:date|None=None,end:date|None=None,
+                  db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE|{'viewer'})
+    tid=ctx['tenant']
+    accounts=db.query(LedgerAccount).filter_by(tenant_id=tid).order_by(LedgerAccount.code).all()
+    qry=db.query(JournalLine,Journal).join(Journal,JournalLine.journal_id==Journal.id).filter(
+        JournalLine.tenant_id==tid,Journal.tenant_id==tid)
+    if start:qry=qry.filter(Journal.journal_date>=start)
+    if end:qry=qry.filter(Journal.journal_date<=end)
+    sums={}
+    for line,_ in qry.all():
+        current=sums.setdefault(line.account_id,[0,0])
+        current[0]+=line.debit;current[1]+=line.credit
+    items=[{**as_dict(a),'debit':sums.get(a.id,[0,0])[0],
+             'credit':sums.get(a.id,[0,0])[1],
+             'balance':sums.get(a.id,[0,0])[0]-sums.get(a.id,[0,0])[1]}
+             for a in accounts]
+    debits=sum(x['debit'] for x in items);credits=sum(x['credit'] for x in items)
+    return {'items':items,'total_debit':debits,'total_credit':credits,
+            'balanced':debits==credits,'start':start.isoformat() if start else None,
+            'end':end.isoformat() if end else None}
+
+@app.get('/api/ledger/profit-loss')
+def profit_loss(start:date|None=None,end:date|None=None,
+                db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,FINANCE|{'viewer'})
+    balance=trial_balance(start,end,db,ctx)
+    rev=sum(a['credit']-a['debit'] for a in balance['items'] if a['kind']=='revenue')
+    expenses=sum(a['debit']-a['credit'] for a in balance['items'] if a['kind']=='expense')
+    return {'revenue':rev,'expenses':expenses,'net_profit':rev-expenses,
+            'balanced':balance['balanced'],'currency':'TOMAN',
+            'account_totals':[x for x in balance['items']
+                if x['kind'] in ('revenue','expense')]}
