@@ -282,6 +282,26 @@ def adjust(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(p
     db.commit()
     return as_dict(stock)
 
+@app.get('/api/stock/cycle-sheet')
+def cycle_sheet(warehouse_id:str,page:int=Query(1,ge=1,le=100000),
+                db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    """Read the quantity snapshot that must match at commit time."""
+    authorized(ctx,WAREHOUSE)
+    tid=ctx['tenant']
+    tenant_object(db,Warehouse,tid,warehouse_id)
+    base=db.query(Variant).filter_by(tenant_id=tid,active=True)
+    total=base.count()
+    variants=base.order_by(Variant.sku).offset((page-1)*100).limit(100).all()
+    stocks=(db.query(Stock).filter(Stock.tenant_id==tid,
+                                  Stock.warehouse_id==warehouse_id,
+                                  Stock.variant_id.in_([v.id for v in variants])).all()) if variants else []
+    by_variant={s.variant_id:s for s in stocks}
+    return {'warehouse_id':warehouse_id,'page':page,'total':total,
+            'items':[{'variant_id':v.id,'sku':v.sku,'name':v.name,
+                      'quantity':by_variant[v.id].quantity if v.id in by_variant else 0,
+                      'reserved':by_variant[v.id].reserved if v.id in by_variant else 0}
+                     for v in variants]}
+
 @app.post('/api/stock/cycle-count')
 def cycle_count(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
     """Count a warehouse snapshot and post any difference to the inventory ledger atomically."""
