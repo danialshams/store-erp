@@ -36,11 +36,10 @@ BEGIN
    'CREATE POLICY erp_tenant_guard ON public.%I FOR ALL TO PUBLIC USING (tenant_id = current_setting(''erp.tenant_id'',true)) WITH CHECK (tenant_id = current_setting(''erp.tenant_id'',true))',tab);
  END LOOP;
 END $$;
-DO $
+DO $$
 BEGIN
  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='store_erp_app_rw') THEN
-  GRANT SELECT,INSERT,UPDATE,DELETE ON public.ledger_accounts,
-    public.journals,public.journal_lines TO store_erp_app_rw;
+  EXECUTE 'GRANT SELECT,INSERT,UPDATE,DELETE ON public.ledger_accounts, public.journals,public.journal_lines TO store_erp_app_rw';
  END IF;
-END $;
+END $$;
 COMMIT;
