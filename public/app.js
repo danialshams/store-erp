@@ -14,7 +14,7 @@ const NAV=[
  ['کالا و موجودی',[['products','کالاها','box'],['variants','تنوع و قیمت','layers'],['categories','دسته‌بندی‌ها','tag'],['warehouses','انبارها','warehouse'],['stocks','موجودی کالا','box'],['batches','بچ و تاریخ انقضا','layers'],['serials','شماره سریال‌ها','tag'],['lot-movements','گردش بچ‌ها','layers'],['expiry-alerts','هشدار انقضا','bell'],['movements','گردش انبار','swap'],['cycle-count','انبارگردانی','check'],['transfers','انتقال بین انبارها','swap']]],
  ['خرید و فروش',[['suppliers','تأمین‌کنندگان','truck'],['purchases','سفارش‌های خرید','cart'],['customers','مشتریان','users'],['sales','فروش و سفارش‌ها','cart'],['returns','مرجوعی‌ها','returns'],['shipments','ارسال و رهگیری','truck']]],
  ['امور مالی',[['invoices','فاکتورهای فروش','file'],['payments','پرداخت‌ها','coins'],['cash-accounts','حساب‌ها','card'],['ledger-accounts','کدینگ حسابداری','layers'],['ledger-journals','اسناد حسابداری','file'],['ledger-balance','تراز آزمایشی','chart'],['ledger-profit','سود و زیان','chart'],['account-entries','گردش حساب‌ها','file'],['price-lists','لیست‌های قیمت','tag'],['price-items','قیمت‌های اختصاصی','tag'],['tax-rates','مالیات‌ها','file'],['reports','گزارش‌ها','chart'],['analytics','تحلیل پیشرفته','chart']]],
- ['مدیریت',[['team','کاربران و دسترسی','users'],['settings','تنظیمات کسب‌وکار','settings'],['integrations','اتصالات آینده','settings'],['audit','تاریخچه عملیات','clock']]]
+ ['مدیریت',[['team','کاربران و دسترسی','users'],['settings','تنظیمات کسب‌وکار','settings'],['security','امنیت و نشست‌ها','settings'],['integrations','اتصالات آینده','settings'],['audit','تاریخچه عملیات','clock']]]
 ];
 const LABELS={id:'شناسه',name:'نام',sku:'کد کالا',code:'کد انبار',barcode:'بارکد',unit:'واحد',description:'توضیحات',category_id:'دسته‌بندی',product_id:'کالا',warehouse_id:'انبار',variant_id:'تنوع کالا',supplier_id:'تأمین‌کننده',customer_id:'مشتری',group_name:'گروه',price:'قیمت',purchase_cost:'بهای خرید',retail_price:'قیمت فروش',wholesale_price:'قیمت عمده',low_stock:'حد هشدار',quantity:'تعداد',reserved:'رزروشده',delta:'تغییر',number:'شماره',status:'وضعیت',total:'مبلغ کل',paid:'پرداخت‌شده',discount:'تخفیف',channel:'کانال فروش',phone:'تلفن',email:'ایمیل',address:'نشانی',notes:'توضیحات',active:'فعال',archived:'آرشیو',read:'خوانده شده',amount:'مبلغ',method:'روش',reference_id:'مرجع',created_at:'تاریخ',carrier:'شرکت حمل',tracking_number:'کد رهگیری',role:'نقش',opening_balance:'موجودی اولیه',percentage:'درصد',title:'عنوان',body:'متن',category:'نوع',reason:'علت',source_id:'انبار مبدأ',destination_id:'انبار مقصد',direction:'جهت',restock:'بازگشت به موجودی',expiry_date:'تاریخ انقضا',lot:'سری ساخت',order_id:'سفارش',purchase_id:'خرید',list_id:'لیست قیمت',actor_id:'کاربر',entity:'موجودیت',action:'عملیات',credit_limit:'سقف اعتبار',track_batch:'ردیابی بچ',track_serial:'ردیابی سریال',image_url:'آدرس تصویر'};
 const NUMERIC=new Set(['purchase_cost','retail_price','wholesale_price','low_stock','credit_limit','price','opening_balance','percentage','quantity','delta','discount']);
@@ -112,6 +112,7 @@ async function loadView(){
    else if(state.view==='analytics')await renderAnalytics();
    else if(state.view==='expiry-alerts')await renderExpiryAlerts();
    else if(state.view==='integrations')await renderIntegrations();
+   else if(state.view==='security')await renderSecurity();
    else if(state.view.startsWith('ledger-'))await renderLedger();
    else if(state.view==='cycle-count')await renderCycleCount();
    else if(state.view==='settings')await renderSettings();
@@ -482,6 +483,37 @@ async function openLedgerJournal(){
  },{save:'ثبت سند'});
 }
 
+async function renderSecurity(){
+ const demo=!!state.me.public_demo;
+ const data=demo?{items:[]}:(await api('auth/sessions'));
+ $('#page-content').innerHTML=`${head('امنیت حساب و نشست‌ها','مدیریت نشست‌های فعال و تعویض رمز عبور',
+ !demo?`<button class="btn btn-primary" id="security-change-password">تغییر رمز عبور ${icon('edit',16)}</button>`:'')}
+ ${demo?'<div class="notice">دموی عمومی فقط برای مشاهده است. مدیریت رمز عبور و نشست کاربر واقعی پس از فعال‌سازی حساب اختصاصی در دسترس قرار می‌گیرد.</div>':''}
+ <div class="panel"><div class="table-wrap"><table class="table"><thead><tr><th>زمان ایجاد</th><th>انقضا</th><th>وضعیت</th><th>عملیات</th></tr></thead>
+ <tbody>${data.items.map(x=>`<tr><td>${dateFa(x.created_at)}</td><td>${dateFa(x.expires_at)}</td>
+ <td>${x.revoked?'<span class="pill bad">لغوشده</span>':'<span class="pill good">معتبر</span>'}</td>
+ <td>${x.revoked?'—':`<button class="btn btn-small btn-danger" data-revoke-session="${esc(x.id)}">لغو نشست ${icon('x',14)}</button>`}</td></tr>`).join('')}
+ ${demo?'<tr><td>۱۴۰۵/۰۸/۱۶</td><td>۱۴۰۵/۰۸/۲۳</td><td><span class="pill good">نمونه نشست معتبر</span></td><td>فقط مشاهده</td></tr>':''}
+ </tbody></table></div></div>
+ <div class="notice" style="margin-top:18px">نشست‌ها با کوکی امن و شناسه قابل لغو مدیریت می‌شوند. پس از تغییر رمز عبور، همه نشست‌های قبلی قطع می‌شوند.</div>`;
+}
+function openChangePassword(){
+ if(state.me.public_demo)return notify('دموی عمومی قابل تغییر نیست',true);
+ const content=`<div class="form-grid"><div class="field full"><label>رمز عبور فعلی</label>
+ <input class="input" type="password" name="current_password" required></div>
+ <div class="field full"><label>رمز عبور جدید (حداقل ۱۲ نویسه)</label>
+ <input class="input" type="password" name="new_password" required minlength="12" maxlength="200"></div>
+ <div class="field full"><label>تکرار رمز جدید</label>
+ <input class="input" type="password" name="repeat_password" required minlength="12" maxlength="200"></div></div>`;
+ showModal('تغییر رمز عبور',content,async form=>{
+  const f=new FormData(form);
+  if(f.get('new_password')!==f.get('repeat_password'))throw Error('تکرار رمز عبور مطابقت ندارد');
+  await api('auth/password/change',{method:'POST',body:{
+     current_password:f.get('current_password'),new_password:f.get('new_password')}});
+  closeModal();state.me=null;renderAuth();notify('رمز عبور تغییر کرد؛ دوباره وارد شوید');
+ },{save:'تغییر رمز'});
+}
+
 async function renderIntegrations(){
  const data=await api('integrations');state.data.integrations=data.items;
  const allowed=!state.me.public_demo&&['owner','admin'].includes(state.me.role);
@@ -605,6 +637,8 @@ root.addEventListener('click',async e=>{
   return openGeneric(state.view);
  }
  if(btn.id==='analytics-refresh')return renderAnalytics();
+ if(btn.hasAttribute('data-revoke-session')){if(confirm('نشست انتخاب‌شده لغو شود؟')){await api('auth/sessions/'+btn.dataset.revokeSession+'/revoke',{method:'POST',body:{}});notify('نشست لغو شد');return renderSecurity()}}
+ if(btn.id==='security-change-password')return openChangePassword();
  if(btn.id==='expiry-filter')return renderExpiryAlerts();
  if(btn.id==='expiry-prev'){state.page=Math.max(1,state.page-1);return renderExpiryAlerts()}
  if(btn.id==='expiry-next'){state.page++;return renderExpiryAlerts()}
@@ -707,7 +741,7 @@ modals.addEventListener('submit',async e=>{
 });
 window.addEventListener('keydown',e=>{if(e.key==='Escape'&&modals.innerHTML)closeModal()});
 async function boot(){
- try{state.me=await api('auth/me');await maybeAcceptInvite();renderShell();const hash=location.hash.slice(1);state.view=(hash==='dashboard'||META[hash]||['reports','settings','team','cycle-count','invoices','ledger-accounts','ledger-journals','ledger-balance','ledger-profit','analytics','expiry-alerts','integrations'].includes(hash))?hash:'dashboard';setView(state.view)}
+ try{state.me=await api('auth/me');await maybeAcceptInvite();renderShell();const hash=location.hash.slice(1);state.view=(hash==='dashboard'||META[hash]||['reports','settings','team','cycle-count','invoices','ledger-accounts','ledger-journals','ledger-balance','ledger-profit','analytics','expiry-alerts','integrations','security'].includes(hash))?hash:'dashboard';setView(state.view)}
  catch{renderAuth()}
 }
 boot();
