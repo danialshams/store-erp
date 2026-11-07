@@ -226,7 +226,8 @@ SPEC={
 READABLE={
  **{k:(v[0],ALL,v[3]) for k,v in SPEC.items()},
  'stocks':(Stock,ALL,[]),'movements':(Movement,ALL,['reason']),
- 'batches':(StockBatch,ALL,['lot']), 'transfers':(Transfer,ALL,['status']),
+ 'batches':(StockBatch,ALL,['lot']), 'serials':(SerialItem,ALL,['serial','status']),
+ 'lot-movements':(LotMovement,ALL,['reason']), 'transfers':(Transfer,ALL,['status']),
  'purchases':(PurchaseOrder,ALL,['number','status']),
  'purchase-lines':(PurchaseLine,ALL,[]),'sales':(SalesOrder,ALL,['number','status']),
  'sales-lines':(SalesLine,ALL,[]),'payments':(Payment,FINANCE|SALES,['method']),
@@ -394,7 +395,7 @@ def _trace_serials(db,ctx,warehouse_id,variant_id,delta,reason,ref,serials,reser
             if len(rows)!=delta:raise HTTPException(409,'سریال‌های در مسیر با تعداد حواله تطابق ندارند')
             for x in rows:x.warehouse_id=warehouse_id;x.status='in_stock';x.reference_id=None
         elif reason=='customer_return':
-            if not isinstance(serials,list) or len(serials)!=delta or len(set(serials))!=delta:
+            if not isinstance(serials,list) or len(serials)!=delta or not all(isinstance(x,str) for x in serials) or len(set(serials))!=delta:
                 raise HTTPException(422,'شماره سریال اقلام برگشتی باید دقیقاً مشخص شود')
             rows=db.query(SerialItem).filter(SerialItem.tenant_id==tid,
                   SerialItem.variant_id==variant_id,SerialItem.serial.in_(serials)).with_for_update().all()
@@ -402,7 +403,7 @@ def _trace_serials(db,ctx,warehouse_id,variant_id,delta,reason,ref,serials,reser
                 raise HTTPException(409,'سریال برگشتی با فروش اصلی مطابقت ندارد')
             for x in rows:x.warehouse_id=warehouse_id;x.status='in_stock';x.reference_id=None
         else:
-            if not isinstance(serials,list) or len(serials)!=delta or len(set(serials))!=delta:
+            if not isinstance(serials,list) or len(serials)!=delta or not all(isinstance(x,str) for x in serials) or len(set(serials))!=delta:
                 raise HTTPException(422,'فهرست سریال‌ها باید دقیقاً برابر تعداد دریافتی باشد')
             for serial in serials:
                 require_string(serial,'شماره سریال',150)
@@ -1361,3 +1362,51 @@ def export_resource(resource:str,db:Session=Depends(db_session),ctx:dict=Depends
     return StreamingResponse(iter([csv_text.encode('utf-8')]),media_type='text/csv; charset=utf-8',
                              headers={'Content-Disposition':f'attachment; filename="erp-{resource}.csv"',
                                       'Cache-Control':'no-store'})
+
+
+@app.post('/api/serials/register')
+def serial_register(body:dict=Body(...),db:Session=Depends(db_session),
+                    ctx:dict=Depends(principal)):
+    """Identify legacy on-hand serialized units without altering aggregate stock."""
+    authorized(ctx,WAREHOUSE)
+    wid=body.get('warehouse_id');vid=body.get('variant_id')
+    tenant_object(db,Warehouse,ctx['tenant'],wid)
+    var=tenant_object(db,Variant,ctx['tenant'],vid)
+    if not var.track_serial:raise HTTPException(409,'ردیابی سریال برای این کالا فعال نیست')
+    requested=body.get('serials')
+    if (not isinstance(requested,list) or not 1<=len(requested)<=100 or
+            not all(isinstance(x,str) and 0<len(x)<=150 for x in requested) or
+            len(set(requested))!=len(requested)):
+        raise HTTPException(422,'شماره سریال‌ها تکراری یا نامعتبر هستند')
+    if db.bind.dialect.name=='postgresql':
+        db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{
+            'key':ctx['tenant']+':'+wid+':'+vid})
+    stock=db.query(Stock).filter_by(tenant_id=ctx['tenant'],warehouse_id=wid,
+                variant_id=vid).with_for_update().first()
+    if not stock:raise HTTPException(409,'ابتدا موجودی کالا را ثبت کنید')
+    registered=db.query(SerialItem).filter_by(tenant_id=ctx['tenant'],warehouse_id=wid,
+                             variant_id=vid,status='in_stock').count()
+    if registered+len(requested)>stock.quantity:
+        raise HTTPException(409,'تعداد سریال‌ها از موجودی ثبت‌شده بیشتر است')
+    for serial in requested:
+        db.add(SerialItem(tenant_id=ctx['tenant'],warehouse_id=wid,
+                          variant_id=vid,serial=serial,status='in_stock'))
+    audit(db,ctx,'register','serials',vid,{'count':len(requested),'warehouse_id':wid})
+    try:db.commit()
+    except IntegrityError:db.rollback();raise HTTPException(409,'شماره سریال تکراری است')
+    return {'ok':True,'registered':len(requested)}
+
+@app.get('/api/stock/traceability/{variant_id}')
+def traceability(variant_id:str,warehouse_id:str,
+                 db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,ALL)
+    tenant_object(db,Variant,ctx['tenant'],variant_id)
+    tenant_object(db,Warehouse,ctx['tenant'],warehouse_id)
+    lots=db.query(StockBatch).filter_by(tenant_id=ctx['tenant'],warehouse_id=warehouse_id,
+                variant_id=variant_id).order_by(StockBatch.expiry_date.asc()).all()
+    serials=db.query(SerialItem).filter_by(tenant_id=ctx['tenant'],warehouse_id=warehouse_id,
+                   variant_id=variant_id).order_by(SerialItem.created_at.desc()).limit(300).all()
+    return {'lots':[as_dict(x) for x in lots],
+            'serials':[as_dict(x) for x in serials],
+            'serial_total':db.query(SerialItem).filter_by(tenant_id=ctx['tenant'],
+               warehouse_id=warehouse_id,variant_id=variant_id).count()}
