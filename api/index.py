@@ -14,7 +14,7 @@ from html import escape as html_escape
 from fastapi import FastAPI, Request, HTTPException, Depends, Body, Query
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import select, func, text, or_
+from sqlalchemy import select, func, text, or_, and_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .db import Session as DbSession, init_db, engine
@@ -1637,3 +1637,31 @@ def change_password(body:dict=Body(...),db:Session=Depends(db_session),
     response=JSONResponse({'ok':True})
     response.delete_cookie('erp_session',path='/')
     return response
+
+
+@app.get('/api/credit-exposure')
+def credit_exposure(page:int=Query(1,ge=1),limit:int=Query(50,ge=1,le=100),
+                    db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    authorized(ctx,SALES|FINANCE|{'viewer'})
+    tid=ctx['tenant']
+    q=db.query(Customer).filter(Customer.tenant_id==tid,Customer.credit_limit>0)
+    total=q.count()
+    customers=q.order_by(Customer.name).offset((page-1)*limit).limit(limit).all()
+    ids=[x.id for x in customers]
+    due={}
+    if ids:
+        for cid,debt in db.query(SalesOrder.customer_id,
+              func.coalesce(func.sum(SalesOrder.total-SalesOrder.paid),0)).filter(
+                SalesOrder.tenant_id==tid,
+                SalesOrder.payment_terms=='credit',
+                SalesOrder.status!='cancelled',
+                SalesOrder.total>SalesOrder.paid,
+                SalesOrder.customer_id.in_(ids)).group_by(
+                    SalesOrder.customer_id).all():
+            due[cid]=int(debt or 0)
+    return {'page':page,'total':total,'items':[
+      {'id':c.id,'name':c.name,'group_name':c.group_name,
+       'credit_limit':c.credit_limit,'outstanding':due.get(c.id,0),
+       'available':max(0,c.credit_limit-due.get(c.id,0)),
+       'over_limit':due.get(c.id,0)>c.credit_limit}
+       for c in customers]}
