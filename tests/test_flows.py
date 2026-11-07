@@ -514,3 +514,61 @@ def test_revocable_auth_sessions_password_change_and_login_throttle():
     assert wrong.post('/api/auth/login',json={
             'email':'no-such-user-throttle@example.com',
             'password':'invalid-credentials'}).status_code==429
+
+
+def test_partial_fulfillment_split_revenue_and_reserve_release():
+    client=TestClient(app)
+    create_user(client,'partial-owner')
+    wh=client.get('/api/data/warehouses').json()['items'][0]
+    product=create(client,'products',name='کالای با ارسال‌های چندمرحله‌ای')
+    first=create(client,'variants',product_id=product['id'],name='مدل یک',
+          sku='PARTIAL-ONE',purchase_cost=250,retail_price=1100)
+    second=create(client,'variants',product_id=product['id'],name='مدل دو',
+          sku='PARTIAL-TWO',purchase_cost=350,retail_price=1500)
+    for v in (first,second):
+        assert client.post('/api/stock/adjust',json={
+            'warehouse_id':wh['id'],'variant_id':v['id'],
+            'delta':10,'reason':'opening'}).status_code==200
+    sale=client.post('/api/sales',json={'warehouse_id':wh['id'],'discount':155,
+         'items':[{'variant_id':first['id'],'quantity':3},
+                  {'variant_id':second['id'],'quantity':2}]}).json()
+    assert client.post('/api/sales/'+sale['id']+'/confirm').status_code==200
+    lines=client.get('/api/documents/sales/'+sale['id']+'/lines').json()['items']
+    l1=next(x for x in lines if x['variant_id']==first['id'])
+    l2=next(x for x in lines if x['variant_id']==second['id'])
+    req={'items':[{'line_id':l1['id'],'quantity':2}],
+         'idempotency_key':'partial-shipment-one'}
+    p1=client.post('/api/sales/'+sale['id']+'/fulfill-partial',json=req)
+    assert p1.status_code==200,p1.text
+    assert p1.json()['order']['status']=='partial'
+    assert client.post('/api/sales/'+sale['id']+'/fulfill-partial',json=req).json()['duplicate'] is True
+    assert client.post('/api/sales/'+sale['id']+'/fulfill-partial',json={
+          **req,'idempotency_key':'partial-overage',
+          'items':[{'line_id':l1['id'],'quantity':3}]}).status_code==409
+    stocks=client.get('/api/data/stocks').json()['items']
+    a=next(x for x in stocks if x['variant_id']==first['id'])
+    b=next(x for x in stocks if x['variant_id']==second['id'])
+    assert a['quantity']==8 and a['reserved']==1
+    assert b['quantity']==10 and b['reserved']==2
+    # Only dispatched units are returnable on a partially shipped sale.
+    assert client.post('/api/returns',json={'direction':'sale','order_id':sale['id'],
+             'variant_id':second['id'],'quantity':1}).status_code==409
+    assert client.post('/api/sales/'+sale['id']+'/fulfill').status_code==200
+    all_docs=client.get('/api/fulfillments').json()['items']
+    assert len(all_docs)==2
+    assert sum(d['revenue'] for d in all_docs)==sale['total']
+    assert sum(d['cost'] for d in all_docs)==3*250+2*350
+    assert client.get('/api/ledger/trial-balance').json()['balanced'] is True
+    assert client.post('/api/sales/'+sale['id']+'/fulfill').status_code==409
+    assert client.post('/api/returns',json={'direction':'sale','order_id':sale['id'],
+             'variant_id':second['id'],'quantity':1,'restock':True}).status_code==200
+    done=client.patch('/api/fulfillments/'+all_docs[0]['id'],json={
+          'carrier':'پیک اختصاصی','tracking_number':'TEST-123','status':'delivered'})
+    assert done.status_code==200,done.text
+    assert client.patch('/api/fulfillments/'+all_docs[0]['id'],
+        json={'status':'shipped'}).status_code==409
+    other=TestClient(app)
+    create_user(other,'partial-stranger')
+    assert other.get('/api/fulfillments').json()['total']==0
+    assert other.patch('/api/fulfillments/'+all_docs[0]['id'],
+        json={'status':'delivered'}).status_code==404
