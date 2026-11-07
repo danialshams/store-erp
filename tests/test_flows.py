@@ -318,3 +318,62 @@ def test_double_entry_finance_posting_and_tenant_scoping():
     assert stranger.get('/api/ledger/journals/'+docs['items'][0]['id']).status_code==404
     assert stranger.post('/api/ledger/journals',json={**data,
           'idempotency_key':'outsider', 'lines':data['lines']}).status_code==404
+
+
+def test_external_adapters_off_analytics_expiry_and_csv_safety():
+    from datetime import date,timedelta
+    from api.db import Session as DbSession
+    from api.models import StockBatch
+    user=TestClient(app)
+    person=create_user(user,'reports-admin')
+    links=user.get('/api/integrations')
+    assert links.status_code==200,links.text
+    assert len(links.json()['items'])==6
+    assert all(x['enabled'] is False for x in links.json()['items'])
+    configured=user.put('/api/integrations/sms',json={'provider':'kavenegar',
+                     'settings':{'sender':'my-test-sender'}})
+    assert configured.status_code==200,configured.text
+    assert configured.json()['enabled'] is False
+    assert user.put('/api/integrations/sms',json={'provider':'kavenegar',
+                 'settings':{'api_key':'SECRET-NOT-ALLOWED'}}).status_code==422
+    assert user.post('/api/integrations/sms/activate',json={}).status_code==501
+    assert user.put('/api/integrations/storage',json={'provider':'minio',
+           'settings':{'endpoint':'http://not-https.example'}}).status_code==422
+    wh=user.get('/api/data/warehouses').json()['items'][0]
+    product=create(user,'products',name='=2+2')
+    variant=create(user,'variants',product_id=product['id'],
+                   name='انقضا',sku='ANALYTIC-001',purchase_cost=10000,
+                   retail_price=20000)
+    db=DbSession()
+    try:
+        db.add(StockBatch(tenant_id=person['tenant_id'],warehouse_id=wh['id'],
+               variant_id=variant['id'],lot='LOT-EXPIRE',quantity=4,
+               expiry_date=date.today()+timedelta(days=5)))
+        db.commit()
+    finally:db.close()
+    ex=user.get('/api/stock/expiry-alerts?days=10')
+    assert ex.status_code==200,ex.text
+    assert ex.json()['total']>=1
+    assert any(x['lot']=='LOT-EXPIRE' for x in ex.json()['items'])
+    assert user.get('/api/stock/expiry-alerts?days=-5').status_code==422
+    sale=user.post('/api/sales',json={'warehouse_id':wh['id'],
+         'items':[{'variant_id':variant['id'],'quantity':2}]})
+    assert sale.status_code==200,sale.text
+    assert user.post('/api/stock/adjust',json={'warehouse_id':wh['id'],
+           'variant_id':variant['id'],'delta':10,'reason':'opening'}).status_code==200
+    assert user.post('/api/sales/'+sale.json()['id']+'/confirm').status_code==200
+    analytics=user.get('/api/analytics')
+    assert analytics.status_code==200,analytics.text
+    assert analytics.json()['orders']>=1
+    assert analytics.json()['sales']>=40000
+    assert user.get('/api/analytics?start=2020-01-01&end=2026-01-01').status_code==422
+    csvfile=user.get('/api/export/products.csv')
+    assert csvfile.status_code==200,csvfile.text
+    assert 'text/csv' in csvfile.headers['content-type']
+    assert "'=2+2" in csvfile.text
+    assert 'erp-products.csv' in csvfile.headers['content-disposition']
+    outsider=TestClient(app)
+    create_user(outsider,'reports-isolated')
+    assert outsider.get('/api/analytics').json()['orders']==0
+    assert outsider.get('/api/stock/expiry-alerts?days=10').json()['total']==0
+    assert '=2+2' not in outsider.get('/api/export/products.csv').text
