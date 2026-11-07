@@ -377,3 +377,97 @@ def test_external_adapters_off_analytics_expiry_and_csv_safety():
     assert outsider.get('/api/analytics').json()['orders']==0
     assert outsider.get('/api/stock/expiry-alerts?days=10').json()['total']==0
     assert '=2+2' not in outsider.get('/api/export/products.csv').text
+
+
+def test_fefo_lot_ordering_returns_and_transfers():
+    from datetime import date,timedelta
+    client=TestClient(app)
+    create_user(client,'lot-owner')
+    wh=client.get('/api/data/warehouses').json()['items'][0]
+    dest=create(client,'warehouses',name='انبار مقصد بچ',code='LOT_DEST')
+    product=create(client,'products',name='کالای بچ دار')
+    variant=create(client,'variants',product_id=product['id'],name='بسته',
+                   sku='LOT-TRACK-1',purchase_cost=100,retail_price=200,
+                   track_batch=True)
+    late=(date.today()+timedelta(days=90)).isoformat()
+    early=(date.today()+timedelta(days=30)).isoformat()
+    def adjust(n,lot,expiry):
+        return client.post('/api/stock/adjust',json={
+            'warehouse_id':wh['id'],'variant_id':variant['id'],
+            'delta':n,'reason':'opening','lot':lot,'expiry_date':expiry})
+    assert adjust(5,'B-late',late).status_code==200
+    assert adjust(5,'A-early',early).status_code==200
+    order=client.post('/api/sales',json={'warehouse_id':wh['id'],
+        'items':[{'variant_id':variant['id'],'quantity':7}]}).json()
+    assert client.post('/api/sales/'+order['id']+'/confirm').status_code==200
+    assert client.post('/api/sales/'+order['id']+'/fulfill').status_code==200
+    trace=client.get('/api/stock/traceability/'+variant['id'],
+                     params={'warehouse_id':wh['id']})
+    assert trace.status_code==200,trace.text
+    bylot={b['lot']:b['quantity'] for b in trace.json()['lots']}
+    assert bylot['A-early']==0 and bylot['B-late']==3
+    returned=client.post('/api/returns',json={'direction':'sale','order_id':order['id'],
+              'variant_id':variant['id'],'quantity':2,'restock':True})
+    assert returned.status_code==200,returned.text
+    bylot={b['lot']:b['quantity'] for b in client.get('/api/stock/traceability/'+variant['id'],
+                 params={'warehouse_id':wh['id']}).json()['lots']}
+    assert bylot['A-early']==2
+    tr=client.post('/api/transfers',json={'source_id':wh['id'],
+           'destination_id':dest['id'],'variant_id':variant['id'],'quantity':2}).json()
+    assert client.post('/api/transfers/'+tr['id']+'/ship').status_code==200
+    assert client.post('/api/transfers/'+tr['id']+'/receive').status_code==200
+    destination=client.get('/api/stock/traceability/'+variant['id'],
+           params={'warehouse_id':dest['id']})
+    assert destination.status_code==200
+    assert sum(b['quantity'] for b in destination.json()['lots'])==2
+    history=client.get('/api/data/lot-movements')
+    assert history.status_code==200
+    assert history.json()['total']>=6
+
+
+def test_serial_lifecycle_and_expired_fefo_rejection():
+    from datetime import date,timedelta
+    client=TestClient(app)
+    owner=create_user(client,'serial-owner')
+    wh=client.get('/api/data/warehouses').json()['items'][0]
+    product=create(client,'products',name='دستگاه سریالی')
+    var=create(client,'variants',product_id=product['id'],name='اصلی',
+               sku='SER-TRACE-1',track_serial=True,purchase_cost=100,retail_price=250)
+    resp=client.post('/api/stock/adjust',json={
+        'warehouse_id':wh['id'],'variant_id':var['id'],'delta':2,
+        'reason':'opening','serials':['SN-001','SN-002']})
+    assert resp.status_code==200,resp.text
+    duplicate=client.post('/api/stock/adjust',json={
+        'warehouse_id':wh['id'],'variant_id':var['id'],'delta':1,
+        'reason':'opening','serials':['SN-001']})
+    assert duplicate.status_code==409
+    order=client.post('/api/sales',json={'warehouse_id':wh['id'],
+          'items':[{'variant_id':var['id'],'quantity':1}]}).json()
+    assert client.post('/api/sales/'+order['id']+'/confirm').status_code==200
+    assert client.post('/api/sales/'+order['id']+'/fulfill').status_code==200
+    sold=client.get('/api/data/serials').json()['items']
+    assert len([v for v in sold if v['status']=='sold' and v['reference_id']==order['id']])==1
+    assert client.post('/api/returns',json={'direction':'sale',
+      'order_id':order['id'],'variant_id':var['id'],'quantity':1,
+      'restock':True,'serials':['SN-002']}).status_code==409
+    returned=client.post('/api/returns',json={'direction':'sale',
+      'order_id':order['id'],'variant_id':var['id'],'quantity':1,
+      'restock':True,'serials':['SN-001']})
+    assert returned.status_code==200,returned.text
+    assert client.get('/api/data/serials').json()['total']==2
+    outsider=TestClient(app)
+    create_user(outsider,'serial-stranger')
+    assert outsider.get('/api/data/serials').json()['total']==0
+    assert outsider.get('/api/stock/traceability/'+var['id'],
+                       params={'warehouse_id':wh['id']}).status_code==404
+
+    badp=create(client,'products',name='محصول تاریخ گذشته')
+    bad=create(client,'variants',product_id=badp['id'],name='اصلی',
+               sku='EXPIRED-LOT',track_batch=True,purchase_cost=50,retail_price=100)
+    yesterday=(date.today()-timedelta(days=1)).isoformat()
+    assert client.post('/api/stock/adjust',json={'warehouse_id':wh['id'],
+        'variant_id':bad['id'],'delta':2,'reason':'opening',
+        'lot':'PAST','expiry_date':yesterday}).status_code==200
+    new=client.post('/api/sales',json={'warehouse_id':wh['id'],
+         'items':[{'variant_id':bad['id'],'quantity':1}]}).json()
+    assert client.post('/api/sales/'+new['id']+'/confirm').status_code==409
