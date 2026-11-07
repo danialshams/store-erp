@@ -405,11 +405,17 @@ def _trace_serials(db,ctx,warehouse_id,variant_id,delta,reason,ref,serials,reser
         else:
             if not isinstance(serials,list) or len(serials)!=delta or not all(isinstance(x,str) for x in serials) or len(set(serials))!=delta:
                 raise HTTPException(422,'فهرست سریال‌ها باید دقیقاً برابر تعداد دریافتی باشد')
+            if db.query(SerialItem).filter(SerialItem.tenant_id==tid,
+                  SerialItem.serial.in_(serials)).first():
+                raise HTTPException(409,'شماره سریال قبلاً ثبت شده است')
             for serial in serials:
                 require_string(serial,'شماره سریال',150)
                 db.add(SerialItem(tenant_id=tid,warehouse_id=warehouse_id,
                                   variant_id=variant_id,serial=serial,status='in_stock'))
-            db.flush()
+            try:db.flush()
+            except IntegrityError:
+                db.rollback()
+                raise HTTPException(409,'شماره سریال تکراری است')
     elif delta<0:
         rows=db.query(SerialItem).filter_by(tenant_id=tid,warehouse_id=warehouse_id,
                    variant_id=variant_id,status='in_stock').order_by(
