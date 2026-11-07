@@ -111,3 +111,37 @@ def test_database_readiness():
     r=client.get('/api/ready')
     assert r.status_code==200,r.text
     assert r.json()=={'ok':True,'database':'connected'}
+
+
+def test_cycle_count_adjustments_and_stale_snapshot():
+    client=TestClient(app)
+    owner=create_user(client,'cycle-owner')
+    wh=client.get('/api/data/warehouses').json()['items'][0]
+    product=create(client,'products',name='کالای انبارگردانی')
+    variant=create(client,'variants',product_id=product['id'],name='اصلی',sku='CYCL-0001',purchase_cost=100,retail_price=200)
+    sheet=client.get('/api/stock/cycle-sheet',params={'warehouse_id':wh['id']})
+    assert sheet.status_code==200,sheet.text
+    assert sheet.json()['items'][0]['quantity']==0
+    initial=client.post('/api/stock/adjust',json={'warehouse_id':wh['id'],'variant_id':variant['id'],'delta':10,'reason':'opening'})
+    assert initial.status_code==200,initial.text
+    payload={'warehouse_id':wh['id'],'idempotency_key':'cycle-first',
+             'items':[{'variant_id':variant['id'],'expected_quantity':10,'counted':7}]}
+    first=client.post('/api/stock/cycle-count',json=payload)
+    assert first.status_code==200,first.text
+    assert first.json()['items'][0]['difference']==-3
+    assert client.post('/api/stock/cycle-count',json=payload).status_code==409
+    stale=client.post('/api/stock/cycle-count',json={**payload,'idempotency_key':'cycle-stale'})
+    assert stale.status_code==409
+    assert client.get('/api/stock/cycle-sheet',params={'warehouse_id':wh['id']}).json()['items'][0]['quantity']==7
+    assert client.post('/api/stock/cycle-count',json={**payload,'idempotency_key':'cycle-empty',
+                'items':[{'variant_id':variant['id'],'expected_quantity':7,'counted':7}]}).status_code==200
+    assert client.post('/api/stock/cycle-count',json={**payload,'idempotency_key':'cycle-negative',
+                'items':[{'variant_id':variant['id'],'expected_quantity':7,'counted':-2}]}).status_code==422
+    assert client.post('/api/stock/cycle-count',json={**payload,'idempotency_key':'cycle-dup',
+                'items':[payload['items'][0],payload['items'][0]]}).status_code==422
+    other=TestClient(app)
+    create_user(other,'cycle-outsider')
+    assert other.get('/api/stock/cycle-sheet',params={'warehouse_id':wh['id']}).status_code==404
+    assert other.post('/api/stock/cycle-count',json=payload).status_code==404
+    movements=client.get('/api/data/movements').json()['items']
+    assert any(m['reason']=='cycle_count' and m['delta']==-3 for m in movements)

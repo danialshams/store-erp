@@ -11,7 +11,7 @@ const ICON={grid:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y=
 function icon(name,size=18){return `<span class="icon"><svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[name]||ICON.box}</svg></span>`}
 const NAV=[
  ['نمای کلی',[['dashboard','داشبورد','grid'],['notifications','اعلان‌ها','bell']]],
- ['کالا و موجودی',[['products','کالاها','box'],['variants','تنوع و قیمت','layers'],['categories','دسته‌بندی‌ها','tag'],['warehouses','انبارها','warehouse'],['stocks','موجودی کالا','box'],['movements','گردش انبار','swap'],['transfers','انتقال بین انبارها','swap']]],
+ ['کالا و موجودی',[['products','کالاها','box'],['variants','تنوع و قیمت','layers'],['categories','دسته‌بندی‌ها','tag'],['warehouses','انبارها','warehouse'],['stocks','موجودی کالا','box'],['movements','گردش انبار','swap'],['cycle-count','انبارگردانی','check'],['transfers','انتقال بین انبارها','swap']]],
  ['خرید و فروش',[['suppliers','تأمین‌کنندگان','truck'],['purchases','سفارش‌های خرید','cart'],['customers','مشتریان','users'],['sales','فروش و سفارش‌ها','cart'],['returns','مرجوعی‌ها','returns'],['shipments','ارسال و رهگیری','truck']]],
  ['امور مالی',[['payments','پرداخت‌ها','coins'],['cash-accounts','حساب‌ها','card'],['account-entries','گردش حساب‌ها','file'],['price-lists','لیست‌های قیمت','tag'],['price-items','قیمت‌های اختصاصی','tag'],['tax-rates','مالیات‌ها','file'],['reports','گزارش‌ها','chart']]],
  ['مدیریت',[['team','کاربران و دسترسی','users'],['settings','تنظیمات کسب‌وکار','settings'],['audit','تاریخچه عملیات','clock']]]
@@ -104,6 +104,7 @@ async function loadView(){
  try{
    if(state.view==='dashboard')await renderDashboard();
    else if(state.view==='reports')await renderReports();
+   else if(state.view==='cycle-count')await renderCycleCount();
    else if(state.view==='settings')await renderSettings();
    else if(state.view==='team')await renderTeam();
    else if(META[state.view])await renderResource();
@@ -140,6 +141,32 @@ function actionBtns(resource,item){
  if(resource==='notifications'&&!item.read)out+=`<button class="btn btn-small btn-light" data-mark-read="${item.id}">خواندم ${icon('check',14)}</button>`;
  return out;
 }
+async function renderCycleCount(selectedWarehouse){
+ const warehouses=await lookup('warehouses',true);
+ const main=$('#page-content');
+ if(!warehouses.length){
+  main.innerHTML=head('انبارگردانی','ابتدا یک انبار بسازید')+'<div class="panel panel-padded"><p>برای شروع انبارگردانی، یک انبار ثبت کنید.</p></div>';
+  return;
+ }
+ const warehouse_id=selectedWarehouse||$('#cycle-warehouse')?.value||warehouses[0].id;
+ const result=await api('stock/cycle-sheet?warehouse_id='+encodeURIComponent(warehouse_id)+'&page='+state.page);
+ const rows=result.items.map(item=>`<tr class="count-row" data-variant="${esc(item.variant_id)}" data-expected="${item.quantity}">
+ <td><strong>${esc(item.sku)}</strong><div class="muted">${esc(item.name)}</div></td>
+ <td class="num">${fa(item.quantity)}</td><td class="num">${fa(item.reserved)}</td>
+ <td style="min-width:130px"><input type="number" name="counted" class="input" required min="${item.reserved}" step="1" max="1000000" value="${item.quantity}" aria-label="تعداد شمارش‌شده ${esc(item.sku)}"></td></tr>`).join('');
+ const options=warehouses.map(w=>`<option value="${esc(w.id)}" ${w.id===warehouse_id?'selected':''}>${esc(w.name)}</option>`).join('');
+ main.innerHTML=`${head('انبارگردانی','موجودی واقعی را وارد کنید. اگر در این فاصله موجودی تغییر کند، ثبت متوقف می‌شود.')}
+ <div class="panel panel-padded" style="margin-bottom:18px"><div class="row wrap between"><div class="field" style="min-width:220px"><label>انبار مورد شمارش</label><select class="input" id="cycle-warehouse">${options}</select></div><button type="button" class="btn btn-outline" id="count-refresh">دریافت موجودی تازه ${icon('swap',16)}</button></div>
+ <p class="notice">موجودی رزروشده قابل کاهش نیست. هر صفحه تا ۱۰۰ کالا دارد. اختلاف‌ها در گردش انبار و تاریخچه عملیات ثبت می‌شوند.</p></div>
+ <form id="cycle-count-form"><div class="panel"><div class="table-wrap"><table class="table">
+ <thead><tr><th>کالا</th><th>موجودی سیستم</th><th>رزروشده</th><th>شمارش واقعی</th></tr></thead>
+ <tbody>${rows||'<tr><td colspan="4" class="muted">کالای فعالی وجود ندارد</td></tr>'}</tbody></table></div>
+ <div class="pagination"><span>صفحه ${fa(state.page)} از ${fa(Math.max(1,Math.ceil(result.total/100)))}</span>
+ <div class="row"><button type="button" class="btn btn-small btn-outline" id="count-prev" ${state.page<=1?'disabled':''}>قبلی</button>
+ <button type="button" class="btn btn-small btn-outline" id="count-next" ${state.page*100>=result.total?'disabled':''}>بعدی</button></div></div></div>
+ <div class="row" style="margin-top:16px"><button class="btn btn-primary" id="cycle-submit" type="submit" ${!result.items.length?'disabled':''}>ثبت انبارگردانی ${icon('check',16)}</button></div></form>`;
+}
+
 async function renderResource(){
  const resource=state.view,meta=META[resource];
  const url=`data/${resource}?page=${state.page}&limit=25&search=${encodeURIComponent(state.search)}`;
@@ -328,6 +355,9 @@ root.addEventListener('click',async e=>{
   return openGeneric(state.view);
  }
  if(btn.id==='adjust-stock')return openAdjustment();
+ if(btn.id==='count-refresh')return renderCycleCount();
+ if(btn.id==='count-prev'){state.page=Math.max(1,state.page-1);return renderCycleCount()}
+ if(btn.id==='count-next'){state.page++;return renderCycleCount()}
  if(btn.id==='page-prev'){state.page=Math.max(1,state.page-1);return loadView()}
  if(btn.id==='page-next'){state.page++;return loadView()}
  if(btn.hasAttribute('data-edit')){const [resource,id]=btn.dataset.edit.split(':');return openGeneric(resource,id)}
@@ -358,6 +388,26 @@ root.addEventListener('click',async e=>{
  }catch(err){notify(err.message,true)}
 });
 root.addEventListener('submit',async e=>{
+ if(e.target.id==='cycle-count-form'){
+  e.preventDefault();
+  const form=e.target,btn=$('#cycle-submit');
+  const warehouse_id=$('#cycle-warehouse')?.value;
+  const items=$('.count-row',form).map(row=>({
+   variant_id:row.dataset.variant,
+   expected_quantity:Number(row.dataset.expected),
+   counted:Number(row.querySelector('input[name=counted]').value)
+  }));
+  if(!items.length)return notify('قلمی برای شمارش وجود ندارد',true);
+  if(items.some(x=>!Number.isSafeInteger(x.counted)||x.counted<0))return notify('تعداد واردشده نامعتبر است',true);
+  if(!confirm('انبارگردانی ثبت شود؟ اختلاف‌ها موجودی و دفتر گردش را تغییر می‌دهند.'))return;
+  btn.disabled=true;
+  try{
+   const r=await api('stock/cycle-count',{method:'POST',body:{warehouse_id,items,idempotency_key:uid()}});
+   notify('انبارگردانی ثبت شد. '+fa(r.items.filter(x=>x.difference!==0).length)+' قلم اصلاح شد');
+   await renderCycleCount(warehouse_id);
+  }catch(err){notify(err.message,true);btn.disabled=false}
+  return;
+ }
  if(e.target.id==='auth-form'){
   e.preventDefault();const form=e.target,mode=form.dataset.mode,f=new FormData(form),btn=$('button[type=submit]',form);
   const body=mode==='register'?{name:f.get('name'),company:f.get('company'),email:f.get('email'),password:f.get('password')}:{email:f.get('email'),password:f.get('password')};
@@ -368,6 +418,7 @@ root.addEventListener('submit',async e=>{
   try{await api('settings',{method:'PATCH',body:{name:f.get('name'),phone:f.get('phone'),address:f.get('address')}});state.me=await api('auth/me');renderShell();setView('settings');notify('تنظیمات ذخیره شد')}catch(err){notify(err.message,true)}
  }
 });
+root.addEventListener('change',e=>{if(e.target.id==='cycle-warehouse'){state.page=1;renderCycleCount(e.target.value)}});
 root.addEventListener('input',e=>{
  if(e.target.id==='table-search'){
   const term=e.target.value;clearTimeout(window.__erpSearch);
@@ -389,7 +440,7 @@ modals.addEventListener('submit',async e=>{
 });
 window.addEventListener('keydown',e=>{if(e.key==='Escape'&&modals.innerHTML)closeModal()});
 async function boot(){
- try{state.me=await api('auth/me');await maybeAcceptInvite();renderShell();const hash=location.hash.slice(1);state.view=(hash==='dashboard'||META[hash]||['reports','settings','team'].includes(hash))?hash:'dashboard';setView(state.view)}
+ try{state.me=await api('auth/me');await maybeAcceptInvite();renderShell();const hash=location.hash.slice(1);state.view=(hash==='dashboard'||META[hash]||['reports','settings','team','cycle-count'].includes(hash))?hash:'dashboard';setView(state.view)}
  catch{renderAuth()}
 }
 boot();

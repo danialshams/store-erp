@@ -282,6 +282,73 @@ def adjust(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(p
     db.commit()
     return as_dict(stock)
 
+@app.get('/api/stock/cycle-sheet')
+def cycle_sheet(warehouse_id:str,page:int=Query(1,ge=1,le=100000),
+                db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    """Read the quantity snapshot that must match at commit time."""
+    authorized(ctx,WAREHOUSE)
+    tid=ctx['tenant']
+    tenant_object(db,Warehouse,tid,warehouse_id)
+    base=db.query(Variant).filter_by(tenant_id=tid,active=True)
+    total=base.count()
+    variants=base.order_by(Variant.sku).offset((page-1)*100).limit(100).all()
+    stocks=(db.query(Stock).filter(Stock.tenant_id==tid,
+                                  Stock.warehouse_id==warehouse_id,
+                                  Stock.variant_id.in_([v.id for v in variants])).all()) if variants else []
+    by_variant={s.variant_id:s for s in stocks}
+    return {'warehouse_id':warehouse_id,'page':page,'total':total,
+            'items':[{'variant_id':v.id,'sku':v.sku,'name':v.name,
+                      'quantity':by_variant[v.id].quantity if v.id in by_variant else 0,
+                      'reserved':by_variant[v.id].reserved if v.id in by_variant else 0}
+                     for v in variants]}
+
+@app.post('/api/stock/cycle-count')
+def cycle_count(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    """Count a warehouse snapshot and post any difference to the inventory ledger atomically."""
+    authorized(ctx,WAREHOUSE)
+    tid=ctx['tenant']
+    warehouse_id=body.get('warehouse_id')
+    tenant_object(db,Warehouse,tid,warehouse_id)
+    key=require_string(body.get('idempotency_key'),'شناسه درخواست',150)
+    existing=db.query(EventKey).filter_by(tenant_id=tid,kind='cycle_count',key=key).first()
+    if existing:raise HTTPException(409,'این دوره انبارگردانی قبلاً ثبت شده است')
+    items=body.get('items')
+    if not isinstance(items,list) or not 1<=len(items)<=100:raise HTTPException(422,'بین ۱ تا ۱۰۰ قلم باید وارد شود')
+    checked=[];seen=set()
+    for item in items:
+        if not isinstance(item,dict):raise HTTPException(422,'قلم نامعتبر')
+        vid=item.get('variant_id')
+        tenant_object(db,Variant,tid,vid)
+        if vid in seen:raise HTTPException(422,'ثبت تکراری کالا در انبارگردانی مجاز نیست')
+        seen.add(vid)
+        counted=item.get('counted');expected=item.get('expected_quantity')
+        if type(counted) is not int or counted<0 or counted>1_000_000:
+            raise HTTPException(422,'تعداد شمارش‌شده نامعتبر است')
+        if type(expected) is not int or expected<0 or expected>1_000_000:
+            raise HTTPException(422,'موجودی مبنای شمارش نامعتبر است')
+        checked.append((vid,counted,expected))
+    cycle_id=str(uuid4());result=[]
+    for vid,counted,expected in sorted(checked):
+        if db.bind.dialect.name=='postgresql':
+            db.execute(text('SELECT pg_advisory_xact_lock(hashtext(:key))'),{'key':tid+':'+warehouse_id+':'+vid})
+        row=db.query(Stock).filter_by(tenant_id=tid,warehouse_id=warehouse_id,variant_id=vid).with_for_update().first()
+        current=row.quantity if row else 0
+        reserved=row.reserved if row else 0
+        if current!=expected:raise HTTPException(409,'موجودی کالا از زمان شمارش تغییر کرده است؛ دوباره بررسی کنید')
+        if counted<reserved:raise HTTPException(409,'موجودی شمارش‌شده نمی‌تواند کمتر از رزرو باشد')
+        delta=counted-current
+        if delta:
+            _stock(db,ctx,warehouse_id,vid,delta,'cycle_count',cycle_id,
+                   note='ثبت انبارگردانی با مبنای موجودی '+str(expected))
+        result.append({'variant_id':vid,'previous':current,'counted':counted,'difference':delta})
+    db.add(EventKey(tenant_id=tid,kind='cycle_count',key=key,reference_id=cycle_id))
+    audit(db,ctx,'cycle_count','stocks',cycle_id,{'warehouse_id':warehouse_id,'items':result})
+    try:db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409,'انبارگردانی تکراری است')
+    return {'id':cycle_id,'warehouse_id':warehouse_id,'items':result}
+
 @app.post('/api/transfers')
 def create_transfer(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
     authorized(ctx,WAREHOUSE)
