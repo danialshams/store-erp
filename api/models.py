@@ -264,6 +264,34 @@ class AccountEntry(Entity,Base):
     note: Mapped[str|None]=mapped_column(Text)
     __table_args__=(CheckConstraint('amount > 0'),)
 
+class LedgerAccount(Entity,Base):
+    """Tenant-local chart of accounts; all postings use integer Toman."""
+    __tablename__='ledger_accounts'
+    code: Mapped[str]=mapped_column(String(20),nullable=False)
+    name: Mapped[str]=mapped_column(String(180),nullable=False)
+    kind: Mapped[str]=mapped_column(String(24),nullable=False)
+    active: Mapped[bool]=mapped_column(Boolean,default=True,nullable=False)
+    __table_args__=(UniqueConstraint('tenant_id','code'),)
+
+class Journal(Entity,Base):
+    """Immutable posted document; idempotent source_key for automated posting."""
+    __tablename__='journals'
+    number: Mapped[str]=mapped_column(String(80),nullable=False)
+    source_key: Mapped[str|None]=mapped_column(String(180))
+    memo: Mapped[str]=mapped_column(Text,default='',nullable=False)
+    journal_date: Mapped[datetime]=mapped_column(Date,nullable=False)
+    actor_id: Mapped[str]=mapped_column(String(36),ForeignKey('users.id'),nullable=False)
+    __table_args__=(UniqueConstraint('tenant_id','number'),UniqueConstraint('tenant_id','source_key'),)
+
+class JournalLine(Entity,Base):
+    __tablename__='journal_lines'
+    journal_id: Mapped[str]=mapped_column(String(36),ForeignKey('journals.id'),nullable=False)
+    account_id: Mapped[str]=mapped_column(String(36),ForeignKey('ledger_accounts.id'),nullable=False)
+    debit: Mapped[int]=mapped_column(BigInteger,default=0,nullable=False)
+    credit: Mapped[int]=mapped_column(BigInteger,default=0,nullable=False)
+    note: Mapped[str|None]=mapped_column(String(250))
+    __table_args__=(CheckConstraint('(debit > 0 AND credit = 0) OR (credit > 0 AND debit = 0)'),)
+
 class Tax(Entity,Base):
     __tablename__='tax_rates'
     name: Mapped[str]=mapped_column(String(100),nullable=False)
