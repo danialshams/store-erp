@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 import os
+from html import escape as html_escape
 from fastapi import FastAPI, Request, HTTPException, Depends, Body, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, func, text, or_
 from sqlalchemy.exc import IntegrityError
@@ -533,6 +534,43 @@ def get_invoice(invoice_id:str,db:Session=Depends(db_session),ctx:dict=Depends(p
     company=db.get(Tenant,ctx['tenant'])
     return {'invoice':as_dict(obj),'items':[as_dict(x) for x in rows],
             'company':{'name':company.name,'phone':company.phone,'address':company.address}}
+
+@app.get('/api/invoices/{invoice_id}/print',response_class=HTMLResponse)
+def print_invoice(invoice_id:str,db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    """Printable internal commercial invoice, not a certified tax invoice."""
+    authorized(ctx,ALL)
+    inv=tenant_object(db,Invoice,ctx['tenant'],invoice_id)
+    company=db.get(Tenant,ctx['tenant'])
+    rows=db.query(InvoiceLine).filter_by(tenant_id=ctx['tenant'],invoice_id=inv.id).all()
+    safe=lambda v: html_escape(str(v or ''))
+    formatted=lambda n: format(n,',')+' تومان'
+    table_rows=''.join(
+        '<tr><td>'+safe(x.sku_snapshot)+'</td><td>'+safe(x.name_snapshot)+'</td><td>'+str(x.quantity)+
+        '</td><td>'+formatted(x.price)+'</td><td>'+formatted(x.quantity*x.price)+'</td></tr>'
+        for x in rows)
+    html_doc='''<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>فاکتور داخلی</title><style>
+    body{font-family:Tahoma,Arial,sans-serif;margin:36px;color:#1b263a;line-height:1.8}
+    header{display:flex;justify-content:space-between;gap:20px;border-bottom:2px solid #d4deeb;padding-bottom:18px}
+    h1{font-size:24px;margin:0}small{color:#666}table{border-collapse:collapse;width:100%;margin-top:30px}
+    th,td{border:1px solid #d3dae6;padding:12px;text-align:right}th{background:#f4f6fa}
+    .total{margin-top:22px;text-align:left;font-weight:bold}.no-tax{margin-top:30px;font-size:12px;color:#666}
+    button{border:0;border-radius:8px;background:#245eab;color:white;padding:10px 20px;cursor:pointer}
+    @media print{button{display:none}body{margin:20px}}
+    </style></head><body><button onclick="window.print()">چاپ فاکتور</button>
+    <header><div><h1>فاکتور فروش داخلی</h1><strong>'''+safe(company.name)+'''</strong>
+    <p>'''+safe(company.address)+'''</p></div><div><div>شماره: '''+safe(inv.number)+'''
+    </div><small>تاریخ: '''+safe(inv.created_at.strftime('%Y-%m-%d'))+'''</small></div></header>
+    <p>خریدار: <strong>'''+safe(inv.customer_name)+'''</strong></p>
+    <p>نشانی: '''+safe(inv.customer_address)+'''</p>
+    <table><thead><tr><th>SKU</th><th>کالا</th><th>تعداد</th><th>قیمت واحد</th><th>مبلغ</th></tr></thead>
+    <tbody>'''+table_rows+'''</tbody></table>
+    <div class="total">جمع ردیف‌ها: '''+formatted(inv.subtotal)+'''<br>
+    تخفیف: '''+formatted(inv.discount)+'''<br>مبلغ نهایی: '''+formatted(inv.total)+'''</div>
+    <div class="no-tax">این سند فاکتور داخلی فروشگاه است و فاکتور رسمی یا دارای تأییدیه سازمان امور مالیاتی نیست.</div>
+    </body></html>'''
+    return HTMLResponse(html_doc)
 
 @app.post('/api/payments')
 def record_payment(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(principal)):
