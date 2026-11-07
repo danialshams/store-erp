@@ -169,6 +169,7 @@ def register(body:dict=Body(...),db:Session=Depends(db_session)):
             db.execute(text("SELECT set_config('erp.tenant_id', :tenant_id, true)"),
                        {'tenant_id':tenant.id})
         db.add(Member(tenant_id=tenant.id,user_id=user.id,role='owner'))
+        _ensure_ledger(db,tenant.id)
         db.add(Warehouse(tenant_id=tenant.id,name='انبار اصلی',code='MAIN'))
         db.add(CashAccount(tenant_id=tenant.id,name='صندوق اصلی',type='cash'))
         db.commit()
@@ -340,6 +341,15 @@ def adjust(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=Depends(p
     reason=require_string(body.get('reason'),'دلیل',100)
     if reason not in ['opening','correction','damage','loss','cycle_count']:raise HTTPException(422,'دلیل معتبر نیست')
     stock=_stock(db,ctx,body.get('warehouse_id'),body.get('variant_id'),delta,reason,note=body.get('note'))
+    cost=tenant_object(db,Variant,ctx['tenant'],body.get('variant_id')).purchase_cost
+    value=abs(delta*cost)
+    if value:
+        if delta>0:
+            _post_journal(db,ctx,'stock-adjust:'+str(uuid4()),'افزایش موجودی - '+reason,
+                          [('1300',value,0),('3000',0,value)])
+        else:
+            _post_journal(db,ctx,'stock-adjust:'+str(uuid4()),'کاهش موجودی - '+reason,
+                          [('6000',value,0),('1300',0,value)])
     audit(db,ctx,'adjust_stock','stocks',stock.id,{'delta':delta,'reason':reason})
     db.commit()
     return as_dict(stock)
@@ -488,12 +498,18 @@ def receive_purchase(purchase_id:str,body:dict=Body(default={}),db:Session=Depen
     desired={item['line_id']:positive(item['quantity']) for item in provided} if provided else {l.id:l.quantity-l.received for l in lines if l.quantity>l.received}
     if not desired:raise HTTPException(409,'قلمی برای دریافت وجود ندارد')
     if set(desired)-{l.id for l in lines}:raise HTTPException(422,'ردیف غیرمجاز')
+    received_value=0
     for line in lines:
         q=desired.get(line.id,0)
         if q:
             if q>line.quantity-line.received:raise HTTPException(409,'دریافت بیش از تعداد سفارش')
             _stock(db,ctx,order.warehouse_id,line.variant_id,q,'purchase_receive',order.id)
             line.received+=q
+            received_value+=q*line.cost
+    if received_value:
+        _post_journal(db,ctx,'purchase-receive:'+order.id+':'+(key or uuid4().hex),
+                      'دریافت سفارش خرید '+order.number,
+                      [('1300',received_value,0),('2000',0,received_value)])
     order.status='received' if all(l.received==l.quantity for l in lines) else 'partial'
     audit(db,ctx,'receive','purchases',order.id,{'lines':desired})
     if key:db.add(EventKey(tenant_id=ctx['tenant'],kind='purchase_receive',key=key,reference_id=order.id))
@@ -531,6 +547,14 @@ def sale_action(sale_id:str,action:str,db:Session=Depends(db_session),ctx:dict=D
     elif action=='fulfill' and order.status=='confirmed':
         for vid,qty in sorted(counts.items()):_stock(db,ctx,order.warehouse_id,vid,-qty,'sale_fulfill',order.id,release_reserved=qty)
         order.status='fulfilled'
+        cogs=sum(int(l.quantity*l.cost_snapshot) for l in lines)
+        postings=[]
+        if order.total:
+            postings.extend([('1200',int(order.total),0),('4000',0,int(order.total))])
+        if cogs:
+            postings.extend([('5000',cogs,0),('1300',0,cogs)])
+        if postings:
+            _post_journal(db,ctx,'sale-fulfill:'+order.id,'تحویل فروش '+order.number,postings)
         notification(db,ctx['tenant'],'سفارش آماده شد',f'سفارش {order.number} از انبار خارج شد.','sale')
     elif action=='cancel' and order.status in ('draft','confirmed'):
         if order.paid>0:raise HTTPException(409,'سفارش دارای پرداخت است؛ ابتدا استرداد را ثبت کنید')
@@ -659,6 +683,13 @@ def record_payment(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=D
     if account_id:
         tenant_object(db,CashAccount,tid,account_id)
         db.add(AccountEntry(tenant_id=tid,account_id=account_id,direction='in' if sale_id else 'out',amount=v,reference=obj.id,note='دریافت سفارش' if sale_id else 'پرداخت خرید'))
+    cash_code='1020' if (account_id and db.get(CashAccount,account_id).type=='bank') else '1010'
+    if sale_id:
+        _post_journal(db,ctx,'payment:'+obj.id,'دریافت بابت فروش '+doc.number,
+                      [(cash_code,v,0),('1200',0,v)])
+    else:
+        _post_journal(db,ctx,'payment:'+obj.id,'پرداخت بابت خرید '+doc.number,
+                      [('2000',v,0),(cash_code,0,v)])
     if sale_id:
         notification(db,tid,'پرداخت موفق',f'پرداخت {v:,} تومان برای سفارش {doc.number} ثبت شد.','payment')
     audit(db,ctx,'record','payments',obj.id,{'amount':v})
@@ -698,7 +729,19 @@ def record_return(body:dict=Body(...),db:Session=Depends(db_session),ctx:dict=De
     if direction=='purchase':_stock(db,ctx,doc.warehouse_id,vid,-qty,'supplier_return',doc.id)
     elif restock:_stock(db,ctx,doc.warehouse_id,vid,qty,'customer_return',doc.id)
     obj=Return(tenant_id=tid,direction=direction,order_id=doc.id if direction=='sale' else None,purchase_id=doc.id if direction=='purchase' else None,variant_id=vid,warehouse_id=doc.warehouse_id,quantity=qty,amount=qty*(line.price if direction=='sale' else line.cost),restock=restock)
-    db.add(obj);db.flush();audit(db,ctx,'create','returns',obj.id)
+    db.add(obj);db.flush()
+    postings=[]
+    if obj.amount:
+        if direction=='sale':
+            postings.extend([('4100',obj.amount,0),('1200',0,obj.amount)])
+        else:
+            postings.extend([('2000',obj.amount,0),('1300',0,obj.amount)])
+    if direction=='sale' and restock and line.cost_snapshot>0:
+        value=qty*line.cost_snapshot
+        postings.extend([('1300',value,0),('5000',0,value)])
+    if postings:
+        _post_journal(db,ctx,'return:'+obj.id,'مرجوعی '+direction,postings)
+    audit(db,ctx,'create','returns',obj.id)
     if key:db.add(EventKey(tenant_id=tid,kind='return',key=key,reference_id=obj.id))
     try:db.commit()
     except IntegrityError:db.rollback();raise HTTPException(409,'درخواست مرجوعی تکراری است')
@@ -743,6 +786,10 @@ def settle_return(return_id:str,body:dict=Body(...),db:Session=Depends(db_sessio
     entry=AccountEntry(tenant_id=tid,account_id=account.id,direction=direction,amount=value,
                        reference=obj.id,note='تسویه مرجوعی '+doc.number)
     db.add(entry);db.flush()
+    cash_code='1020' if account.type=='bank' else '1010'
+    postings=([('1200',value,0),(cash_code,0,value)] if obj.direction=='sale'
+              else [(cash_code,value,0),('2000',0,value)])
+    _post_journal(db,ctx,'return-settle:'+key,'تسویه مرجوعی '+doc.number,postings)
     db.add(EventKey(tenant_id=tid,kind='return_settlement',key=key,reference_id=obj.id))
     audit(db,ctx,'settle_return','returns',obj.id,{'amount':value,'account_id':account.id})
     notification(db,tid,'تسویه مرجوعی',f'تسویه {value:,} تومان برای {doc.number} ثبت شد.','finance')
