@@ -266,3 +266,55 @@ def test_public_showroom_is_isolated_and_read_only(monkeypatch):
     assert real.get('/api/auth/me').json()['tenant_id']==real_user['tenant_id']
     assert real.post('/api/data/products',json={'name':'دومین کالای خصوصی'}).status_code==200
     assert anonymous.get('/api/data/products').json()['total']==1
+
+
+def test_double_entry_finance_posting_and_tenant_scoping():
+    client=TestClient(app)
+    owner=create_user(client,'ledger-owner')
+    accounts=client.get('/api/ledger/accounts')
+    assert accounts.status_code==200,accounts.text
+    assert accounts.json()['total']>=10
+    by_code={x['code']:x['id'] for x in accounts.json()['items']}
+    data={'memo':'سند اصلاحی نمونه','idempotency_key':'manual-ledger-1',
+          'lines':[{'account_id':by_code['1010'],'debit':2000000,'credit':0},
+                   {'account_id':by_code['3000'],'debit':0,'credit':2000000}]}
+    assert client.post('/api/ledger/journals',json={**data,'lines':[
+          data['lines'][0],{**data['lines'][1],'credit':1999999}]}).status_code==422
+    good=client.post('/api/ledger/journals',json=data)
+    assert good.status_code==200,good.text
+    assert good.json()['total']==2000000
+    assert client.post('/api/ledger/journals',json=data).status_code==409
+    accounts_before=client.get('/api/ledger/accounts').json()['total']
+    assert client.post('/api/ledger/bootstrap').status_code==200
+    assert client.get('/api/ledger/accounts').json()['total']==accounts_before
+    warehouse=client.get('/api/data/warehouses').json()['items'][0]
+    product=create(client,'products',name='کالای دفتر کل')
+    variant=create(client,'variants',product_id=product['id'],name='اصلی',sku='GL-2026-1',
+                   purchase_cost=2500000,retail_price=5000000)
+    assert client.post('/api/stock/adjust',json={'warehouse_id':warehouse['id'],
+                  'variant_id':variant['id'],'delta':4,'reason':'opening'}).status_code==200
+    order=client.post('/api/sales',json={'warehouse_id':warehouse['id'],
+                   'items':[{'variant_id':variant['id'],'quantity':1}]}).json()
+    assert client.post('/api/sales/'+order['id']+'/confirm').status_code==200
+    assert client.post('/api/sales/'+order['id']+'/fulfill').status_code==200
+    pay=client.post('/api/payments',json={'sale_id':order['id'],'amount':3000000,
+                      'method':'cash','idempotency_key':'ledger-payment-over-1m'})
+    assert pay.status_code==200,pay.text
+    trial=client.get('/api/ledger/trial-balance')
+    assert trial.status_code==200,trial.text
+    assert trial.json()['balanced'] is True
+    assert trial.json()['total_debit']==trial.json()['total_credit']>10000000
+    report=client.get('/api/ledger/profit-loss')
+    assert report.status_code==200,report.text
+    assert report.json()['revenue']>=5000000
+    assert report.json()['net_profit']==report.json()['revenue']-report.json()['expenses']
+    docs=client.get('/api/ledger/journals').json()
+    assert docs['total']>=4
+    journal=client.get('/api/ledger/journals/'+docs['items'][0]['id'])
+    assert journal.status_code==200
+    assert sum(x['debit'] for x in journal.json()['lines'])==sum(x['credit'] for x in journal.json()['lines'])
+    stranger=TestClient(app)
+    create_user(stranger,'ledger-outsider')
+    assert stranger.get('/api/ledger/journals/'+docs['items'][0]['id']).status_code==404
+    assert stranger.post('/api/ledger/journals',json={**data,
+          'idempotency_key':'outsider', 'lines':data['lines']}).status_code==404
