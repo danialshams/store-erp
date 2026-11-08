@@ -747,3 +747,50 @@ def test_fefo_availability_is_tenant_scoped_expiry_aware_and_read_only():
                      sku='FEFO-PREVIEW-2')
     assert owner.get(f"/api/stock/fefo-availability/{untracked['id']}",
                      params={'warehouse_id':warehouse['id']}).status_code==422
+
+
+def test_stock_integrity_audit_is_read_only_and_tenant_scoped():
+    from api.db import Session as DbSession
+    from api.models import Stock
+    owner=TestClient(app)
+    info=create_user(owner,'inventory-audit-owner')
+    wh=owner.get('/api/data/warehouses').json()['items'][0]
+    product=create(owner,'products',name='Inventory audit sample')
+    variant=create(owner,'variants',product_id=product['id'],
+                   sku='AUDIT-LOT-1',name='tracked',track_batch=True,
+                   purchase_cost=100,retail_price=200)
+    result=owner.post('/api/stock/adjust',json={
+        'warehouse_id':wh['id'],'variant_id':variant['id'],
+        'delta':5,'reason':'opening','lot':'LOT-A'})
+    assert result.status_code==200,result.text
+    path='/api/stock/integrity'
+    params={'warehouse_id':wh['id'],'limit':200}
+    assert owner.get(path,params=params).status_code==200
+    assert all(row['variant_id']!=variant['id']
+               for row in owner.get(path,params=params).json()['items'])
+    db=DbSession()
+    try:
+        row=db.query(Stock).filter_by(tenant_id=info['tenant_id'],
+              warehouse_id=wh['id'],variant_id=variant['id']).one()
+        row.quantity=3
+        db.commit()
+    finally:db.close()
+    response=owner.get(path,params=params)
+    assert response.status_code==200,response.text
+    discrepancies=[x for x in response.json()['items'] if x['variant_id']==variant['id']]
+    assert len(discrepancies)==1
+    assert discrepancies[0]['quantity']==3
+    assert discrepancies[0]['batch_quantity']==5
+    assert discrepancies[0]['issues']==['batch_quantity_mismatch']
+    assert owner.get(path,params=params).json()==response.json()
+    outsider=TestClient(app)
+    create_user(outsider,'inventory-audit-outsider')
+    assert outsider.get(path,params=params).status_code==404
+    assert owner.get(path,params={'warehouse_id':'unknown-warehouse'}).status_code==404
+    assert owner.get(path,params={'limit':201}).status_code==422
+    # A report never repairs or mutates either inventory or batch records.
+    db=DbSession()
+    try:
+        assert db.query(Stock).filter_by(tenant_id=info['tenant_id'],
+               warehouse_id=wh['id'],variant_id=variant['id']).one().quantity==3
+    finally:db.close()
