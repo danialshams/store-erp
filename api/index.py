@@ -28,25 +28,26 @@ if PUBLIC.is_dir():
 
 @app.middleware('http')
 async def safety_middleware(request:Request,call_next):
+    def secure(response):
+        response.headers['X-Content-Type-Options']='nosniff'
+        response.headers['X-Frame-Options']='DENY'
+        response.headers['Referrer-Policy']='strict-origin-when-cross-origin'
+        response.headers['Cache-Control']='no-store'
+        return response
     if (public_demo_enabled() and request.url.path.startswith('/api/')
             and request.method in ('POST','PUT','PATCH','DELETE')
             and not request.cookies.get('erp_session')):
         # Public visitors can browse an isolated demo but never mutate it.
         # Authenticated customer sessions still use their own tenant and permissions.
-        return JSONResponse({'detail':'نسخه نمایشی فقط برای مشاهده است'},status_code=403)
+        return secure(JSONResponse({'detail':'نسخه نمایشی فقط برای مشاهده است'},status_code=403))
     if request.url.path.startswith('/api/'):
         try:
             csrf_guard(request)
         except HTTPException as exc:
             # Middleware executes outside FastAPI's exception handler; returning
             # a response here avoids a misleading 500 on rejected origins.
-            return JSONResponse({'detail': exc.detail}, status_code=exc.status_code)
-    response=await call_next(request)
-    response.headers['X-Content-Type-Options']='nosniff'
-    response.headers['X-Frame-Options']='DENY'
-    response.headers['Referrer-Policy']='strict-origin-when-cross-origin'
-    response.headers['Cache-Control']='no-store'
-    return response
+            return secure(JSONResponse({'detail': exc.detail}, status_code=exc.status_code))
+    return secure(await call_next(request))
 
 @app.get('/')
 def index(): return FileResponse(PUBLIC/'index.html')
