@@ -29,7 +29,7 @@ jobs:
           python -m py_compile api/*.py
           node --check public/app.js
       - name: SQLite functional and authorization tests
-        run: PYTHONPATH=. python -m pytest -q tests/test_flows.py tests/test_security_headers.py
+        run: PYTHONPATH=. python -m pytest -q tests/test_flows.py tests/test_security_headers.py tests/test_csrf_origin.py
       - name: PostgreSQL schema bootstrap
         env:
           DATABASE_URL: postgresql+psycopg2://erp:ci-only-secret@localhost:5432/erp
