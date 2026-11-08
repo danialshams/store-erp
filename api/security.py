@@ -108,6 +108,7 @@ def csrf_guard(request: Request):
         ):
             raise HTTPException(403, 'درخواست از مبدأ غیرمجاز')
         origin = request.headers.get('origin')
+        if origin:
             host=request.headers.get('host','')
             from urllib.parse import urlparse
             o=urlparse(origin)
