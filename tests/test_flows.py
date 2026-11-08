@@ -525,6 +525,52 @@ def test_serial_lifecycle_and_expired_fefo_rejection():
     assert client.post('/api/sales/'+new['id']+'/confirm').status_code==409
 
 
+
+def test_explicit_serial_picking_is_atomic_tenant_scoped_and_validated():
+    """A warehouse can choose exact physical serials, not just the oldest ones."""
+    client=TestClient(app)
+    create_user(client,'serial-pick')
+    wh=client.get('/api/data/warehouses').json()['items'][0]
+    product=create(client,'products',name='دستگاه با شماره سریال قابل انتخاب')
+    var=create(client,'variants',product_id=product['id'],name='اصلی',
+               sku='SER-PICK-001',track_serial=True,purchase_cost=100,retail_price=200)
+    base={'warehouse_id':wh['id'],'variant_id':var['id']}
+    add=client.post('/api/stock/adjust',json={**base,'delta':3,
+         'reason':'opening','serials':['PICK-1','PICK-2','PICK-3']})
+    assert add.status_code==200,add.text
+    before=client.get('/api/data/stocks').json()['items']
+    qty=lambda:next(x['quantity'] for x in client.get('/api/data/stocks').json()['items']
+                    if x['variant_id']==var['id'])
+    assert qty()==3
+    for bad in (['PICK-1','PICK-1'],['PICK-1','MISSING'],['PICK-1'],['PICK-1',42]):
+        r=client.post('/api/stock/adjust',json={**base,'delta':-2,
+                      'reason':'correction','serials':bad})
+        assert r.status_code in (409,422),r.text
+        assert qty()==3
+    other=TestClient(app)
+    create_user(other,'serial-pick-other')
+    ow=other.get('/api/data/warehouses').json()['items'][0]
+    op=create(other,'products',name='محصول سازمان دیگر')
+    ov=create(other,'variants',product_id=op['id'],name='اصلی',
+              sku='OTHER-PICK-001',track_serial=True,purchase_cost=100,retail_price=200)
+    assert other.post('/api/stock/adjust',json={
+        'warehouse_id':ow['id'],'variant_id':ov['id'],'delta':1,
+        'reason':'opening','serials':['FOREIGN-SERIAL']}).status_code==200
+    assert client.post('/api/stock/adjust',json={**base,'delta':-1,
+        'reason':'correction','serials':['FOREIGN-SERIAL']}).status_code==409
+    assert qty()==3
+    picked=client.post('/api/stock/adjust',json={**base,'delta':-1,
+        'reason':'correction','serials':['PICK-3']})
+    assert picked.status_code==200,picked.text
+    assert qty()==2
+    serials=client.get('/api/data/serials').json()['items']
+    states={x['serial']:x['status'] for x in serials}
+    assert states['PICK-3']=='retired'
+    assert states['PICK-1']=='in_stock' and states['PICK-2']=='in_stock'
+    assert 'FOREIGN-SERIAL' not in states
+
+
+
 def test_revocable_auth_sessions_password_change_and_login_throttle():
     from api.db import Session as DbSession
     from api.models import LoginThrottle
