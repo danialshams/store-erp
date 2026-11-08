@@ -466,9 +466,20 @@ def _trace_serials(db,ctx,warehouse_id,variant_id,delta,reason,ref,serials,reser
                 db.rollback()
                 raise HTTPException(409,'شماره سریال تکراری است')
     elif delta<0:
-        rows=db.query(SerialItem).filter_by(tenant_id=tid,warehouse_id=warehouse_id,
-                   variant_id=variant_id,status='in_stock').order_by(
-                       SerialItem.created_at.asc()).with_for_update().limit(-delta).all()
+        # Explicit picking is essential for warranty, shipment and audit trails.
+        # When omitted, preserve FIFO behavior for existing integrations.
+        if serials is not None:
+            if (not isinstance(serials,list) or len(serials)!=-delta or
+                any(not isinstance(x,str) or not x.strip() or len(x)>150 for x in serials) or
+                len(set(serials))!=-delta):
+                raise HTTPException(422,'سریال‌های خروجی باید یکتا و برابر تعداد خروج باشند')
+            rows=db.query(SerialItem).filter_by(
+                tenant_id=tid,warehouse_id=warehouse_id,variant_id=variant_id,
+                status='in_stock').filter(SerialItem.serial.in_(serials)).with_for_update().all()
+        else:
+            rows=db.query(SerialItem).filter_by(tenant_id=tid,warehouse_id=warehouse_id,
+                       variant_id=variant_id,status='in_stock').order_by(
+                           SerialItem.created_at.asc()).with_for_update().limit(-delta).all()
         if len(rows)!=-delta:raise HTTPException(409,'شماره سریال موجود برای خروج کافی نیست')
         to_status={'sale_fulfill':'sold','transfer_ship':'in_transit',
                    'supplier_return':'supplier_returned',
