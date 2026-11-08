@@ -39,3 +39,45 @@ def test_same_origin_fetch_metadata_is_not_blocked_by_csrf_guard():
              'headers': [(b'host', b'testserver'), (b'sec-fetch-site', b'same-origin'),
                          (b'cookie', b'erp_session=fake-session-cookie')]}
     csrf_guard(Request(scope))
+
+
+def test_same_site_cookie_without_origin_rejected_for_every_mutation_method():
+    """Sibling subdomains must not mutate authenticated sessions via any verb."""
+    from fastapi import HTTPException
+    from api.security import csrf_guard
+    from starlette.requests import Request
+    for method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+        scope = {
+            'type': 'http', 'method': method, 'scheme': 'https',
+            'path': '/api/auth/logout', 'query_string': b'',
+            'headers': [
+                (b'host', b'testserver'),
+                (b'sec-fetch-site', b'same-site'),
+                (b'cookie', b'erp_session=fake-session-cookie'),
+            ],
+        }
+        try:
+            csrf_guard(Request(scope))
+        except HTTPException as exc:
+            assert exc.status_code == 403, method
+        else:
+            raise AssertionError(f'{method} bypassed same-site CSRF protection')
+
+
+def test_cross_site_without_origin_rejected_for_every_mutation_method():
+    from fastapi import HTTPException
+    from api.security import csrf_guard
+    from starlette.requests import Request
+    for method in ('POST', 'PUT', 'PATCH', 'DELETE'):
+        scope = {
+            'type': 'http', 'method': method, 'scheme': 'https',
+            'path': '/api/auth/logout', 'query_string': b'',
+            'headers': [(b'host', b'testserver'),
+                        (b'sec-fetch-site', b'cross-site')],
+        }
+        try:
+            csrf_guard(Request(scope))
+        except HTTPException as exc:
+            assert exc.status_code == 403, method
+        else:
+            raise AssertionError(f'{method} bypassed cross-site CSRF protection')
