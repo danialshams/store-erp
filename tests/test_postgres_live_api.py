@@ -67,7 +67,7 @@ def test_public_showroom_never_returns_other_tenants_across_core_modules():
     # A one-row smoke check can miss leakage on subsequent pages.
     for resource in (
         "products", "variants", "customers", "suppliers", "warehouses",
-        "stocks", "sales", "purchases", "invoices", "movements",
+        "stocks", "sales", "purchases", "movements",
     ):
         response = client.get(f"/api/data/{resource}", params={"limit": 50})
         assert response.status_code == 200, (resource, response.text)
@@ -76,15 +76,22 @@ def test_public_showroom_never_returns_other_tenants_across_core_modules():
         for row in payload["items"]:
             assert row["tenant_id"] == demo, (resource, row.get("id"))
 
+    invoices = client.get("/api/invoices", params={"limit": 50})
+    assert invoices.status_code == 200, invoices.text
+    invoice_payload = invoices.json()
+    for row in invoice_payload.get("items", []):
+        assert row["tenant_id"] == demo, row.get("id")
+
 
 def test_public_showroom_rejects_every_mutation_method_on_postgresql():
     # Must not rely solely on frontend read-only controls.
     for method in ("POST", "PUT", "PATCH", "DELETE"):
+        path = "/api/data/products" if method in ("POST", "PUT") else "/api/data/products/nonexistent-demo-id"
         response = client.request(
-            method, "/api/data/products",
+            method, path,
             json={"name": "Public write must fail"},
         )
-        assert response.status_code in (401, 403, 405), (
+        assert response.status_code == 403, (
             method, response.status_code, response.text
         )
         # No cross-tenant data should be exposed in denial responses.
