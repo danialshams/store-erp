@@ -34,9 +34,4 @@ def test_anonymous_existing_product_is_immutable():
         after = client.get("/api/data/products", params={"page": 1, "limit": 1})
         assert after.status_code == 200, after.text
         assert after.json()["total"] == body["total"]
-        # Do not rely on pagination order staying constant: locate the original ID.
-        found = client.get("/api/data/products", params={"page": 1, "limit": 500})
-        assert found.status_code == 200, found.text
-        same = next((p for p in found.json()["items"] if p["id"] == product_id), None)
-        assert same is not None, product_id
-        assert same == product, (product, same)
+        assert after.json()["items"][0] == product, (product, after.json()["items"][0])
