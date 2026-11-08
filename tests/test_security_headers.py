@@ -24,3 +24,22 @@ def test_normal_response_has_security_headers():
     response = TestClient(app).get("/api/ready")
     for key, value in EXPECTED.items():
         assert response.headers.get(key) == value, (key, response.headers)
+
+
+def test_public_demo_write_rejection_has_security_headers(monkeypatch):
+    """Anonymous showroom writes must fail without leaking cacheable responses."""
+    monkeypatch.setenv("PUBLIC_DEMO_ENABLED", "true")
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.post("/api/data/products", json={"name": "unauthorized write"})
+    assert response.status_code == 403, response.text
+    for key, value in EXPECTED.items():
+        assert response.headers.get(key) == value, (key, response.headers)
+
+
+def test_public_demo_patch_rejection_has_security_headers(monkeypatch):
+    monkeypatch.setenv("PUBLIC_DEMO_ENABLED", "true")
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.patch("/api/data/products/not-a-real-id", json={"name": "changed"})
+    assert response.status_code == 403, response.text
+    for key, value in EXPECTED.items():
+        assert response.headers.get(key) == value, (key, response.headers)
