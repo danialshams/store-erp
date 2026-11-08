@@ -656,6 +656,35 @@ def test_fefo_availability_is_tenant_scoped_expiry_aware_and_read_only():
     assert [(x['lot'],x['quantity']) for x in result['allocation']]==[
         ('early',3),('late',4)]
     assert owner.get(path,params=query).json()==result
+    # Regression: a legacy/imported batch ledger can disagree with the
+    # physical aggregate. FEFO must not promise stock that is not on hand.
+    from api.db import Session as DbSession
+    from api.models import Stock
+    db=DbSession()
+    try:
+        physical=db.query(Stock).filter_by(
+            tenant_id=owner.get('/api/auth/me').json()['tenant_id'],
+            warehouse_id=warehouse['id'],variant_id=variant['id']).one()
+        physical.quantity=5
+        db.commit()
+    finally:
+        db.close()
+    capped=owner.get(path,params=query)
+    assert capped.status_code==200,capped.text
+    assert capped.json()['available']==5
+    assert capped.json()['allocatable']==5
+    assert capped.json()['sufficient'] is False
+    assert [(x['lot'],x['quantity']) for x in capped.json()['allocation']]==[
+        ('early',3),('late',2)]
+    db=DbSession()
+    try:
+        physical=db.query(Stock).filter_by(
+            tenant_id=owner.get('/api/auth/me').json()['tenant_id'],
+            warehouse_id=warehouse['id'],variant_id=variant['id']).one()
+        physical.quantity=17
+        db.commit()
+    finally:
+        db.close()
     assert owner.get(path,params={'warehouse_id':warehouse['id'],
                                   'quantity':10}).json()['sufficient'] is False
     assert owner.get(path,params={'warehouse_id':warehouse['id'],
