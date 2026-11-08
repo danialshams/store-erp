@@ -119,3 +119,27 @@ def test_public_showroom_isolation_across_pagination_boundaries():
         beyond = client.get(f"/api/data/{resource}", params={"page": last_page + 1, "limit": 25})
         assert beyond.status_code == 200, (resource, beyond.text)
         assert beyond.json()["items"] == [], resource
+
+
+def test_stale_session_cookie_cannot_mutate_postgresql_showroom():
+    """Expired/invalid cookies may preview demo reads, never write any resource."""
+    stale = TestClient(app, raise_server_exceptions=False)
+    stale.cookies.set("erp_session", "invalid.expired")
+    before = stale.get("/api/data/products", params={"limit": 1})
+    assert before.status_code == 200, before.text
+    assert before.json()["items"][0]["tenant_id"] == demo
+    count = before.json()["total"]
+
+    for method, path in (
+        ("POST", "/api/data/products"),
+        ("PUT", "/api/data/products"),
+        ("PATCH", "/api/data/products/nonexistent-demo-id"),
+        ("DELETE", "/api/data/products/nonexistent-demo-id"),
+    ):
+        response = stale.request(method, path, json={"name": "Forbidden stale-session write"})
+        assert response.status_code in (401, 403), (method, response.status_code, response.text)
+
+    after = stale.get("/api/data/products", params={"limit": 1})
+    assert after.status_code == 200, after.text
+    assert after.json()["total"] == count
+    assert all(row["tenant_id"] == demo for row in after.json()["items"])
