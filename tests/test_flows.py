@@ -788,6 +788,14 @@ def test_stock_integrity_audit_is_read_only_and_tenant_scoped():
     assert outsider.get(path,params=params).status_code==404
     assert owner.get(path,params={'warehouse_id':'unknown-warehouse'}).status_code==404
     assert owner.get(path,params={'limit':201}).status_code==422
+    # Empty pagination must preserve the same read-only contract as populated pages.
+    empty=owner.get(path,params={'warehouse_id':wh['id'],'page':100000,'limit':1})
+    assert empty.status_code==200,empty.text
+    assert empty.json()['items']==[]
+    assert empty.json()['discrepancies']==0
+    assert empty.json()['read_only'] is True
+    assert empty.json()['total']>=1
+
     # A report never repairs or mutates either inventory or batch records.
     db=DbSession()
     try:

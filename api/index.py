@@ -1687,7 +1687,7 @@ def stock_integrity(warehouse_id:str|None=None,
     if warehouse_id:query=query.filter(Stock.warehouse_id==warehouse_id)
     total=query.count()
     rows=query.order_by(Stock.warehouse_id,Stock.variant_id).offset((page-1)*limit).limit(limit).all()
-    if not rows:return {'items':[],'total':total,'page':page,'limit':limit,'discrepancies':0}
+    if not rows:return {'items':[],'total':total,'page':page,'limit':limit,'discrepancies':0,'read_only':True}
     keys={(stock.warehouse_id,stock.variant_id) for stock,_ in rows}
     warehouses={w for w,_ in keys};variants={v for _,v in keys}
     lots=(db.query(StockBatch.warehouse_id,StockBatch.variant_id,
