@@ -1669,6 +1669,61 @@ def fefo_availability(variant_id:str,warehouse_id:str,
             'advisory':True}
 
 
+@app.get('/api/stock/integrity')
+def stock_integrity(warehouse_id:str|None=None,
+                    page:int=Query(1,ge=1,le=100000),
+                    limit:int=Query(100,ge=1,le=200),
+                    db:Session=Depends(db_session),ctx:dict=Depends(principal)):
+    """Read-only stock-vs-traceability reconciliation, scoped to one tenant.
+
+    Flags discrepancies but never silently repairs stock, lots or serials.
+    """
+    authorized(ctx,WAREHOUSE|SALES)
+    tid=ctx['tenant']
+    if warehouse_id:tenant_object(db,Warehouse,tid,warehouse_id)
+    query=(db.query(Stock,Variant)
+           .join(Variant,Stock.variant_id==Variant.id)
+           .filter(Stock.tenant_id==tid,Variant.tenant_id==tid))
+    if warehouse_id:query=query.filter(Stock.warehouse_id==warehouse_id)
+    total=query.count()
+    rows=query.order_by(Stock.warehouse_id,Stock.variant_id).offset((page-1)*limit).limit(limit).all()
+    if not rows:return {'items':[],'total':total,'page':page,'limit':limit,'discrepancies':0}
+    keys={(stock.warehouse_id,stock.variant_id) for stock,_ in rows}
+    warehouses={w for w,_ in keys};variants={v for _,v in keys}
+    lots=(db.query(StockBatch.warehouse_id,StockBatch.variant_id,
+                   func.sum(StockBatch.quantity))
+          .filter(StockBatch.tenant_id==tid,
+                  StockBatch.warehouse_id.in_(warehouses),
+                  StockBatch.variant_id.in_(variants))
+          .group_by(StockBatch.warehouse_id,StockBatch.variant_id).all())
+    serials=(db.query(SerialItem.warehouse_id,SerialItem.variant_id,func.count(SerialItem.id))
+             .filter(SerialItem.tenant_id==tid,SerialItem.status=='in_stock',
+                     SerialItem.warehouse_id.in_(warehouses),
+                     SerialItem.variant_id.in_(variants))
+             .group_by(SerialItem.warehouse_id,SerialItem.variant_id).all())
+    batch_map={(w,v):int(q or 0) for w,v,q in lots}
+    serial_map={(w,v):int(q or 0) for w,v,q in serials}
+    items=[]
+    for stock,variant in rows:
+        key=(stock.warehouse_id,stock.variant_id)
+        flags=[]
+        if stock.quantity<0 or stock.reserved<0 or stock.reserved>stock.quantity:
+            flags.append('invalid_stock_balance')
+        batch_quantity=batch_map.get(key,0) if variant.track_batch else None
+        serial_quantity=serial_map.get(key,0) if variant.track_serial else None
+        if variant.track_batch and batch_quantity!=stock.quantity:
+            flags.append('batch_quantity_mismatch')
+        if variant.track_serial and serial_quantity!=stock.quantity:
+            flags.append('serial_quantity_mismatch')
+        if flags:
+            items.append({'warehouse_id':stock.warehouse_id,'variant_id':stock.variant_id,
+                          'sku':variant.sku,'quantity':stock.quantity,
+                          'reserved':stock.reserved,'batch_quantity':batch_quantity,
+                          'serial_quantity':serial_quantity,'issues':flags})
+    return {'items':items,'total':total,'page':page,'limit':limit,
+            'discrepancies':len(items),'read_only':True}
+
+
 @app.get('/api/stock/traceability/{variant_id}')
 def traceability(variant_id:str,warehouse_id:str,
                  db:Session=Depends(db_session),ctx:dict=Depends(principal)):
