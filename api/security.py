@@ -99,8 +99,15 @@ def csrf_guard(request: Request):
         # when the browser omits Origin (for example, some form submissions).
         if request.headers.get('sec-fetch-site', '').lower() == 'cross-site':
             raise HTTPException(403, 'درخواست از مبدأ غیرمجاز')
-        # A sibling subdomain is same-site, not same-origin. Without an\n        # Origin header it must not be allowed to mutate cookie sessions.\n        if (request.cookies.get('erp_session') and\n                request.headers.get('sec-fetch-site', '').lower() == 'same-site' and\n                not request.headers.get('origin')):\n            raise HTTPException(403, 'درخواست از مبدأ غیرمجاز')\n        origin=request.headers.get('origin')
-        if origin:
+        # A sibling subdomain is same-site, not same-origin. Without an
+        # Origin header it must not be allowed to mutate cookie sessions.
+        if (
+            request.cookies.get('erp_session')
+            and request.headers.get('sec-fetch-site', '').lower() == 'same-site'
+            and not request.headers.get('origin')
+        ):
+            raise HTTPException(403, 'درخواست از مبدأ غیرمجاز')
+        origin = request.headers.get('origin')
             host=request.headers.get('host','')
             from urllib.parse import urlparse
             o=urlparse(origin)
