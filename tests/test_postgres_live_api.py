@@ -132,7 +132,7 @@ def test_stale_session_cookie_cannot_mutate_postgresql_showroom():
 
     for method, path in (
         ("POST", "/api/data/products"),
-        ("PUT", "/api/data/products"),
+        ("PUT", "/api/integrations/sms"),
         ("PATCH", "/api/data/products/nonexistent-demo-id"),
         ("DELETE", "/api/data/products/nonexistent-demo-id"),
     ):
