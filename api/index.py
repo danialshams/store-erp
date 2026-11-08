@@ -1635,7 +1635,11 @@ def fefo_availability(variant_id:str,warehouse_id:str,
     reserved=stock.reserved if stock else 0
     # A reservation is not tied to a batch; subtract the reserved aggregate
     # conservatively instead of promising stock already committed elsewhere.
-    available=max(0,valid_total-reserved)
+    # Lot totals may temporarily diverge from aggregate inventory (e.g.
+    # legacy adjustments). Never promise more than the physical stock ledger.
+    # Reservations are aggregate and must be subtracted only once.
+    physical=stock.quantity if stock else 0
+    available=max(0,min(valid_total,physical)-reserved)
     remaining=min(quantity,available)
     allocation=[]
     for lot in eligible:
