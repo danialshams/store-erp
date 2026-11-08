@@ -60,3 +60,39 @@ def test_double_entry_integrity_over_actual_postgresql_demo():
     assert body["journal_count"] > 0, body
     assert body["issue_count"] == 0, body
     assert client.get("/api/ledger/integrity?start=2026-12-31&end=2026-01-01").status_code == 422
+
+
+def test_public_showroom_never_returns_other_tenants_across_core_modules():
+    # Verify returned rows, not just the tenant ID in /auth/me.
+    # A one-row smoke check can miss leakage on subsequent pages.
+    for resource in (
+        "products", "variants", "customers", "suppliers", "warehouses",
+        "stocks", "sales", "purchases", "movements",
+    ):
+        response = client.get(f"/api/data/{resource}", params={"limit": 50})
+        assert response.status_code == 200, (resource, response.text)
+        payload = response.json()
+        assert isinstance(payload.get("items"), list), (resource, payload)
+        for row in payload["items"]:
+            assert row["tenant_id"] == demo, (resource, row.get("id"))
+
+    invoices = client.get("/api/invoices", params={"limit": 50})
+    assert invoices.status_code == 200, invoices.text
+    invoice_payload = invoices.json()
+    for row in invoice_payload.get("items", []):
+        assert row["tenant_id"] == demo, row.get("id")
+
+
+def test_public_showroom_rejects_every_mutation_method_on_postgresql():
+    # Must not rely solely on frontend read-only controls.
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        path = "/api/data/products" if method in ("POST", "PUT") else "/api/data/products/nonexistent-demo-id"
+        response = client.request(
+            method, path,
+            json={"name": "Public write must fail"},
+        )
+        assert response.status_code == 403, (
+            method, response.status_code, response.text
+        )
+        # No cross-tenant data should be exposed in denial responses.
+        assert "database" not in response.text.lower(), (method, response.text)
