@@ -96,3 +96,26 @@ def test_public_showroom_rejects_every_mutation_method_on_postgresql():
         )
         # No cross-tenant data should be exposed in denial responses.
         assert "database" not in response.text.lower(), (method, response.text)
+
+
+def test_public_showroom_isolation_across_pagination_boundaries():
+    """Check later pages too: a first-page-only tenant test misses leaks."""
+    for resource in ("products", "variants", "customers", "stocks", "sales", "purchases"):
+        first = client.get(f"/api/data/{resource}", params={"page": 1, "limit": 25})
+        assert first.status_code == 200, (resource, first.text)
+        total = first.json()["total"]
+        assert total > 25, (resource, total)
+        last_page = (total + 24) // 25
+        for page in (1, 2, last_page):
+            response = client.get(f"/api/data/{resource}", params={"page": page, "limit": 25})
+            assert response.status_code == 200, (resource, page, response.text)
+            payload = response.json()
+            assert payload["total"] == total, (resource, page, payload)
+            assert payload["page"] == page, (resource, page, payload)
+            assert payload["items"], (resource, page, payload)
+            assert all(row["tenant_id"] == demo for row in payload["items"]), (
+                resource, page
+            )
+        beyond = client.get(f"/api/data/{resource}", params={"page": last_page + 1, "limit": 25})
+        assert beyond.status_code == 200, (resource, beyond.text)
+        assert beyond.json()["items"] == [], resource
