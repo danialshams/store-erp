@@ -143,3 +143,41 @@ def test_stale_session_cookie_cannot_mutate_postgresql_showroom():
     assert after.status_code == 200, after.text
     assert after.json()["total"] == count
     assert all(row["tenant_id"] == demo for row in after.json()["items"])
+
+
+def test_postgresql_journal_lines_balance_without_relying_on_api_aggregation():
+    """Independent database-level check of persisted double-entry journal lines.
+
+    The API integrity endpoint alone could regress together with its own
+    aggregation logic. Check persisted rows directly on disposable CI Postgres.
+    """
+    from sqlalchemy import text
+    from api.db import engine
+
+    with engine.connect() as conn:
+        totals = conn.execute(text("""
+            SELECT j.id, j.tenant_id, COUNT(l.id) AS line_count,
+                   COALESCE(SUM(l.debit), 0) AS debit_total,
+                   COALESCE(SUM(l.credit), 0) AS credit_total,
+                   COUNT(*) FILTER (WHERE l.tenant_id <> j.tenant_id
+                                      OR a.tenant_id <> j.tenant_id) AS cross_tenant_lines
+            FROM journals j
+            LEFT JOIN journal_lines l ON l.journal_id = j.id
+            LEFT JOIN ledger_accounts a ON a.id = l.account_id
+            GROUP BY j.id, j.tenant_id
+        """)).mappings().all()
+        assert totals, "Expected seeded PostgreSQL journals"
+        assert any(row["tenant_id"] == demo for row in totals)
+        for row in totals:
+            assert row["line_count"] >= 2, row
+            assert row["debit_total"] > 0, row
+            assert row["debit_total"] == row["credit_total"], row
+            assert row["cross_tenant_lines"] == 0, row
+
+        invalid_lines = conn.execute(text("""
+            SELECT COUNT(*) FROM journal_lines
+            WHERE debit < 0 OR credit < 0
+               OR (debit = 0 AND credit = 0)
+               OR (debit > 0 AND credit > 0)
+        """)).scalar_one()
+        assert invalid_lines == 0
