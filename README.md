@@ -6,7 +6,7 @@
 
 ## Public showroom mode (temporary, read-only)
 
-To demonstrate the full panel without a sign-in page, apply `migrations/0003_seed_public_demo.sql` **after migrations 0001 and 0002**, then set `PUBLIC_DEMO_ENABLED=true` on the preview deployment. This is an additive, idempotent seed: it inserts a dedicated tenant `demo-erp-tenant-2026`, a synthetic unloginable demo user, and thousands of fictional records, and it does not delete or modify existing customers.
+To demonstrate the full panel without a sign-in page, apply the versioned migrations in numeric order, including `migrations/0003_seed_public_demo.sql`, then set `PUBLIC_DEMO_ENABLED=true` on the preview deployment. This is an additive, idempotent seed: it inserts a dedicated tenant `demo-erp-tenant-2026`, a synthetic unloginable demo user, and thousands of fictional records, and it does not delete or modify existing customers.
 
 With this flag enabled, anonymous **GET/HEAD** requests are restricted to the demo tenant and the UI shows all sections with explicit read-only messaging. Anonymous **POST/PATCH/PUT/DELETE** calls return HTTP 403. Real signed-in sessions retain their original tenant identity and permissions. A visitor cannot access a real tenant without a valid signed user session. Set `PUBLIC_DEMO_ENABLED=false` later to restore the regular sign-in screen and standard authentication flow; never remove authorization from the backend.
 
@@ -19,7 +19,7 @@ Seeded sections include catalog/categories/variants, customers, suppliers, wareh
 - Python 3.12+, FastAPI, SQLAlchemy 2, PostgreSQL 14+ (production), SQLite (local automated tests only)
 - Dependency-light HTML/CSS/JavaScript frontend (no framework lock-in), Persian RTL, Vazirmatn
 - HTTP-only signed session cookie, PBKDF2-SHA256 password hashing (600,000 iterations), tenant-scoped API queries, RBAC checks
-- 32 relational tables with FKs, unique constraints, integer TOMAN money, ISO timestamps; UI formats Jalali dates
+- PostgreSQL schema with versioned additive migrations (including the original 32 tables and later extensions), FKs, unique constraints, integer TOMAN money, ISO timestamps; UI formats Jalali dates
 - Stock adjustments and transitions use PostgreSQL advisory transaction locks and row locks, nonnegative/free-stock checks, movement ledger and audit records
 - Docker Compose + PostgreSQL for self-hosting; Vercel Python adapter for temporary hosting
 
@@ -42,7 +42,7 @@ Seeded sections include catalog/categories/variants, customers, suppliers, wareh
 | Finance/reporting | Cash accounts, payments, manual return settlement, simple account entries; immutable internal invoice snapshots and printable HTML; inventory/sales/margin/receivable/payable reports + CSV |
 | Settings/audit | Company profile, roles/invites, audit event records |
 
-**What is not production-complete:** real bank gateway/webhook integration, full double-entry bookkeeping/official tax invoice issuance, batch/serial FEFO stock deduction, shipping provider integrations, external shop sync, email/SMS invite delivery, robust stock allocation at scale, full audit/RLS defense-in-depth, password reset/MFA, server-side report exports/pagination beyond 1000 rows. Those must be built and tested before commercial launch. **Do not represent this version as a fully finished 14-module ERP.**
+**What is not independently accepted for commercial production:** external gateway/webhook, official tax integrations, shipping provider, external shop sync, email/SMS and storage integrations require external services. Double-entry accounting, batch/serial FEFO, stock allocation under concurrency, tenant isolation, CSRF, session security, report exports and browser workflows require comprehensive end-to-end acceptance evidence; implementation or passing unit tests alone is insufficient. Those must be built and tested before commercial launch. **Do not represent this version as a fully finished 14-module ERP.**
 
 ## Local development (SQLite only for quick UI checks)
 
@@ -73,9 +73,11 @@ This creates the PostgreSQL service and app service. Data survives container res
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0001_schema.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f migrations/0002_invoices.sql
+# Then apply every subsequent numbered migration in migrations/ in ascending order.
+# Do not re-run an unverified non-idempotent migration against a populated database.
 ```
 
-For new DBs, `python -m api.init_db` creates the same ORM tables and indexes. For future changes use versioned migrations (e.g. Alembic); do not rely on `create_all` to change existing tables. Migration 0001 creates the original 30 tables, and additive migration 0002 adds 2 invoice snapshot tables. Use both in order on a fresh database. Run migration once before Vercel production deployment.
+For new DBs, `python -m api.init_db` creates the same ORM tables and indexes. For future changes use versioned migrations (e.g. Alembic); do not rely on `create_all` to change existing tables. Migration 0001 creates the original 30 tables, and additive migration 0002 adds 2 invoice snapshot tables. These are NOT the complete current schema: later migrations add further tables and policies. Use all applicable numbered migrations in order on a fresh database. Run migration once before Vercel production deployment.
 
 ## Temporary Vercel hosting
 
@@ -117,8 +119,8 @@ python -m py_compile api/*.py
 ## Security & deployment gates
 
 - Rotate app secret, use encrypted environment storage, HTTPS and private PostgreSQL credentials.
-- Enforce rate limits on login, add CSRF defense-in-depth and strict server-side request schemas.
-- Add tenant-scoped **database-level RLS** or an app-level PostgreSQL role/policy design as defense in depth; current tenant isolation is enforced in API code.
+- Verify login rate limits, CSRF defense-in-depth and strict server-side request schemas against real browser and PostgreSQL flows.
+- Audit the existing PostgreSQL RLS policies, role permissions and tenant-scoped composite foreign keys against every new table and endpoint; verify isolation using separate database roles and multiple tenants.
 - Verify PostgreSQL concurrency/locking with parallel-worker load tests, backups and restoration.
 - Build more automated tests for role permissions, invoice/payment reconciliation, partial receipts/returns and multi-tenant data references.
 - Perform accessibility, RTL, mobile QA and operational monitoring before launching.
